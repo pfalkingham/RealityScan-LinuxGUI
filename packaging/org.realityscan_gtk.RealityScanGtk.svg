@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1a5fb4"/>
+    </linearGradient>
+    <linearGradient id="mesh" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f5f4"/>
+      <stop offset="1" stop-color="#c0bfbc"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#bg)"/>
+  <!-- camera ring -->
+  <ellipse cx="64" cy="96" rx="40" ry="11" fill="none" stroke="#f9f06b" stroke-width="3" stroke-dasharray="4 5"/>
+  <!-- mesh object -->
+  <polygon points="64,24 92,42 92,78 64,96 36,78 36,42" fill="url(#mesh)" stroke="#241f31" stroke-width="2.5" stroke-linejoin="round"/>
+  <polyline points="36,42 64,60 92,42 M64,60 64,96 M36,78 64,60 M92,78 64,60" fill="none" stroke="#241f31" stroke-width="2" stroke-linejoin="round"/>
+  <!-- sparse points -->
+  <g fill="#99c1f1">
+    <circle cx="26" cy="30" r="2.5"/><circle cx="104" cy="28" r="2"/><circle cx="18" cy="60" r="2"/>
+    <circle cx="110" cy="62" r="2.5"/><circle cx="24" cy="88" r="2"/><circle cx="106" cy="90" r="2"/>
+  </g>
+</svg>

@@ -1,0 +1,6 @@
+$Using("RealityScan.Report.IteratorsFunctionSet")
+$Using("RealityScan.Report.ControlPointsExportFunctionSet")
+$Using("RealityScan.Report.DistanceConstraintsExportFunctionSet")
+{"points":[$ExportControlPoints({"index":$(index),"name":"$Replace("\"","\\\"",$EscapeBackslashes($(name)))","measurementCount":$(measurementCount),"calibrationType":$(calibrationType),"aligned":$If(isAligned,true)$If(!isAligned,false)$If(isAligned,,"x":$(actualXEuclid),"y":$(actualYEuclid),"z":$(actualZEuclid)$ControlPointError(index,,"error":$(maxPlacementError)))},)null],
+"measurements":[$ExportControlPointsMeasurements({"point":$(pointIndex),"pointName":"$Replace("\"","\\\"",$EscapeBackslashes($(pointName)))","measurement":$(measurementIndex),"imageIndex":$(imageIndex),"image":"$EscapeBackslashes($(imagePath)$(imageName)$(imageExt))","x":$(x),"y":$(y)},)null],
+"constraints":[$ExportDistanceConstraints({"name":"$Replace("\"","\\\"",$EscapeBackslashes($(constraintName)))","a":"$Replace("\"","\\\"",$EscapeBackslashes($(pointA)))","b":"$Replace("\"","\\\"",$EscapeBackslashes($(pointB)))","enabled":$If(Enable,true)$If(!Enable,false),"defined":$(definedDistance),"calculated":$(calculatedDistance),"error":$(distanceError)},)null]}

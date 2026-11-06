@@ -1,0 +1,8 @@
+$Using("RealityScan.Report.ProjectInformationExportFunctionSet")
+$Using("RealityScan.Report.IteratorsFunctionSet")
+$Using("RealityScan.Report.ComponentFunctionSet")
+$Using("RealityScan.Report.SfmExportFunctionSet")
+{"version":"$EscapeBackslashes($(appVersion))","selectedCameraCount":$Ifdef(cameraCount,$(cameraCount))$Ifndef(cameraCount,0),"selectedPointCount":$Ifdef(pointCount,$(pointCount))$Ifndef(pointCount,0),
+"project":$ExportProjectInfo({"name":"$Replace("\"","\\\"",$EscapeBackslashes($(projectName)))","path":"$EscapeBackslashes($(projectPath))","guid":"$(projectGUID)","changeCount":$(changeCount),"imageCount":$(imageCount),"componentCount":$(componentCount),"selectedComponent":"$(actualComponentGUID)","selectedModel":"$(actualModelGUID)"}),
+"images":[$IterateImages({"index":$(inputIndex),"name":"$Replace("\"","\\\"",$EscapeBackslashes($(inputImageName)))","ext":"$EscapeBackslashes($(inputImageExt))","dir":"$EscapeBackslashes($(inputImagePath))","width":$(inputWidth),"height":$(inputHeight),"aligned":$If(inputIsAligned,true)$If(!inputIsAligned,false),"cameraIndex":$(inputCameraIndex),"alignEnabled":$If(inputAlignmentEnabled,true)$If(!inputAlignmentEnabled,false),"meshEnabled":$If(inputMeshingEnabled,true)$If(!inputMeshingEnabled,false),"textureEnabled":$If(inputTexturingEnabled,true)$If(!inputTexturingEnabled,false)},)null],
+"components":[$IterateComponents({"guid":"$(componentGUID)","name":"$Replace("\"","\\\"",$EscapeBackslashes($(componentName)))","cameraCount":$(componentCamerasCount),"models":[$IterateModels("$(componentGUID)",{"guid":"$(modelGUID)","name":"$Replace("\"","\\\"",$EscapeBackslashes($(modelName)))","triangles":$(modelTrianglesCount),"vertices":$(modelVerticesCount)},)null]},)null]}

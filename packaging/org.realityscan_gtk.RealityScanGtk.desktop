@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=RealityScan GTK
+GenericName=Photogrammetry
+Comment=Native front-end for RealityScan running headless under Wine
+Exec=realityscan-gtk %f
+Icon=org.realityscan_gtk.RealityScanGtk
+Terminal=false
+Categories=Graphics;3DGraphics;Photography;GNOME;GTK;
+MimeType=application/x-realityscan-project;
+Keywords=photogrammetry;3D;scan;mesh;RealityScan;RealityCapture;
+StartupNotify=true
+DBusActivatable=false

@@ -1,0 +1,10 @@
+/target
+*.swp
+
+# Epic reference material: local only
+/docs/realityscan-ref/*
+!/docs/realityscan-ref/README.md
+
+# dxcore.dll build outputs (tools/dxcore)
+/tools/dxcore/dxcore.dll
+/tools/dxcore/wine/

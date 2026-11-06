@@ -1,0 +1,60 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rs-client",
+    "crates/rs-scene",
+    "crates/rs-backend",
+    "crates/rs-render",
+    "crates/realityscan-gtk",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+authors = ["Peter Falkingham"]
+repository = "https://github.com/pfalkingham/realityscan-gtk"
+
+[workspace.dependencies]
+rs-client = { path = "crates/rs-client" }
+rs-scene = { path = "crates/rs-scene" }
+rs-backend = { path = "crates/rs-backend" }
+rs-render = { path = "crates/rs-render" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "process", "fs", "io-util", "signal"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1"] }
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs = "7"
+libc = "0.2"
+gtk4 = { version = "0.11", features = ["v4_18"] }
+libadwaita = { version = "0.9", features = ["v1_7"] }
+async-channel = "2"
+glow = "0.18"
+glam = "0.34"
+libloading = "0.9"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff", "webp", "rayon"] }
+jxl-oxide = { version = "0.12", features = ["image", "rayon"] }
+rayon = "1"
+
+# Image decoding (jxl-oxide, image) is unusably slow unoptimised; optimise dependencies
+# even in dev builds while keeping our own crates quick to compile and debuggable.
+# Our own crates get light optimisation in dev builds too: mesh loading and the lasso's
+# per-triangle work are an order of magnitude slower unoptimised.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

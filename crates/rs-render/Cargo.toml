@@ -1,0 +1,12 @@
+[package]
+name = "rs-render"
+description = "OpenGL renderer for RealityScan scenes: point clouds, camera frusta, helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+glow.workspace = true
+glam.workspace = true
