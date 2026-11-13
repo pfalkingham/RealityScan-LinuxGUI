@@ -11,9 +11,9 @@ Command plugin. Alignment, meshing, texturing, control points and scaling, masks
 and export all run through RealityScan's engine, with a native window, drag-and-drop and a
 hardware-accelerated 3D view.
 
-![The image view on one photo: a measured control point and dashed markers where three other points project into this image](docs/image-view.jpg)
+![The finished textured mesh, from a 72-image turntable scan](docs/whole-model.jpg)
 
-![A lasso selection on a mesh: the visible triangles inside the outline are highlighted, with Remove / Keep only / Invert in a bar below](docs/lasso.jpg)
+![The 3D view after alignment: camera frustums around the specimen and the sparse point cloud](docs/point-cloud.jpg)
 
 Usable for real work (the screenshots are a 72 × 45 MP scan) but still early: expect rough
 edges. [docs/usage.md](docs/usage.md) walks through the features, shortcuts and
