@@ -85,9 +85,11 @@ happening. Then:
 - Add images or folders (toolbar, Ctrl+I, or drop them on the window).
 - Press **Run** (F9) for RealityScan's standard workflow: align, normal-detail model, texture.
   The pipeline buttons run the stages one at a time, with their settings under the arrows.
-- Orbit the result in the 3D view, open a photo by double-clicking its thumbnail, place control
-  points in photos or by Ctrl+clicking the model, paint masks, lasso and clean the mesh, and
-  export (Ctrl+E) in the usual formats.
+- Orbit the result in the 3D view (perspective or parallel, with top/front/side views), set
+  and turn the reconstruction region, level the scene with the ground plane, open a photo by
+  double-clicking its thumbnail, place control points in photos or by Ctrl+clicking the model,
+  paint, generate and export masks, lasso and clean the mesh, and export (Ctrl+E) in the usual
+  formats.
 
 [docs/usage.md](docs/usage.md) has the full tour, the shortcuts, performance notes (including
 GPU-accelerated AI masking) and troubleshooting.

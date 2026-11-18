@@ -11,6 +11,20 @@ pub struct OrbitCamera {
     pub pitch: f32,
     pub up: Vec3,
     pub fov_y: f32,
+    /// Parallel (orthographic) projection instead of perspective. The visible height is the
+    /// one the perspective view has at the target, so switching keeps the framing.
+    pub orthographic: bool,
+}
+
+/// Standard views along the world axes (`up` is +Z, as in RealityScan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewPreset {
+    Top,
+    Bottom,
+    Front,
+    Back,
+    Left,
+    Right,
 }
 
 /// Orbit sensitivity: a full turn in about 840 pixels of drag.
@@ -26,6 +40,7 @@ impl Default for OrbitCamera {
             pitch: 0.5,
             up: Vec3::Y,
             fov_y: 50f32.to_radians(),
+            orthographic: false,
         }
     }
 }
@@ -63,9 +78,46 @@ impl OrbitCamera {
     }
 
     pub fn view_projection(&self, aspect: f32) -> Mat4 {
+        if self.orthographic {
+            let half_h = self.half_height();
+            let far = self.distance * 100.0;
+            // Geometry behind the eye stays visible: a parallel view has no vanishing point,
+            // so the near plane sits as far behind the eye as the far plane is in front.
+            return orthographic(half_h * aspect, half_h, -far, far) * self.view();
+        }
         let near = (self.distance * 0.001).max(1e-4);
         let far = self.distance * 100.0;
         perspective(self.fov_y, aspect, near, far) * self.view()
+    }
+
+    /// Half the visible height at the target distance (the parallel view's extent).
+    pub fn half_height(&self) -> f32 {
+        self.distance * (self.fov_y * 0.5).tan()
+    }
+
+    /// World units per pixel at view depth `depth` (the target's depth in a parallel view).
+    pub fn world_per_pixel(&self, depth: f32, viewport_height: f32) -> f32 {
+        let depth = if self.orthographic { self.distance } else { depth.max(1e-3) };
+        2.0 * depth * (self.fov_y * 0.5).tan() / viewport_height.max(1.0)
+    }
+
+    /// Look at the target along a world axis, keeping target and distance. Top and bottom
+    /// views keep +Y (−Y from below) pointing up on screen.
+    pub fn set_preset(&mut self, preset: ViewPreset) {
+        // Directions from the target to the eye, for the default Z-up world.
+        let tilt = PITCH_LIMIT;
+        let dir = match preset {
+            ViewPreset::Top => Vec3::new(0.0, -tilt.cos(), tilt.sin()),
+            ViewPreset::Bottom => Vec3::new(0.0, tilt.cos(), -tilt.sin()),
+            ViewPreset::Front => Vec3::NEG_Y,
+            ViewPreset::Back => Vec3::Y,
+            ViewPreset::Left => Vec3::NEG_X,
+            ViewPreset::Right => Vec3::X,
+        };
+        // Express it in this camera's frame when `up` isn't Z (rotate Z onto `up`).
+        let dir = Quat::from_rotation_arc(Vec3::Z, self.up.normalize()) * dir;
+        let target = self.target;
+        self.set_eye_target(target + dir.normalize() * self.distance, target);
     }
 
     /// Rotate by screen-space deltas (pixels) around the target.
@@ -107,7 +159,7 @@ impl OrbitCamera {
 
     /// Move the target in the view plane by screen-space deltas (pixels).
     pub fn pan(&mut self, dx: f32, dy: f32, viewport_height: f32) {
-        let scale = 2.0 * self.distance * (self.fov_y * 0.5).tan() / viewport_height.max(1.0);
+        let scale = self.world_per_pixel(self.distance, viewport_height);
         let view = self.view();
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
@@ -130,6 +182,16 @@ pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
         Vec4::new(s.y, u.y, -f.y, 0.0),
         Vec4::new(s.z, u.z, -f.z, 0.0),
         Vec4::new(-s.dot(eye), -u.dot(eye), f.dot(eye), 1.0),
+    )
+}
+
+/// OpenGL orthographic projection (clip z in -1..1), symmetric around the view axis.
+pub fn orthographic(half_w: f32, half_h: f32, near: f32, far: f32) -> Mat4 {
+    Mat4::from_cols(
+        Vec4::new(1.0 / half_w, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 1.0 / half_h, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, -2.0 / (far - near), 0.0),
+        Vec4::new(0.0, 0.0, -(far + near) / (far - near), 1.0),
     )
 }
 
@@ -211,6 +273,35 @@ mod tests {
                 "elevation must not depend on yaw"
             );
         }
+    }
+
+    #[test]
+    fn orthographic_keeps_the_framing_at_the_target() {
+        let mut cam = OrbitCamera::framing(Vec3::splat(-1.0), Vec3::splat(1.0), Vec3::Z);
+        let p = cam.target + Vec3::Z * 0.5;
+        let a = cam.view_projection(1.0).project_point3(p);
+        cam.orthographic = true;
+        let b = cam.view_projection(1.0).project_point3(p);
+        assert!((a.y - b.y).abs() < 0.02, "{a} vs {b}");
+        // Behind the eye is still in front of the near plane.
+        let behind = cam.eye() + (cam.eye() - cam.target).normalize() * 0.5;
+        assert!(cam.view_projection(1.0).project_point3(behind).z.abs() <= 1.0);
+    }
+
+    #[test]
+    fn presets_look_along_the_axes() {
+        let mut cam = OrbitCamera { up: Vec3::Z, ..OrbitCamera::default() };
+        cam.set_preset(ViewPreset::Front);
+        let d = (cam.eye() - cam.target).normalize();
+        assert!((d - Vec3::NEG_Y).length() < 1e-4, "{d}");
+        cam.set_preset(ViewPreset::Right);
+        assert!(((cam.eye() - cam.target).normalize() - Vec3::X).length() < 1e-4);
+        cam.set_preset(ViewPreset::Top);
+        let d = (cam.eye() - cam.target).normalize();
+        assert!(d.z > 0.999, "{d}");
+        // +Y is up on screen from above.
+        let up_on_screen = cam.view().transform_vector3(Vec3::Y);
+        assert!(up_on_screen.y > 0.9, "{up_on_screen}");
     }
 
     #[test]

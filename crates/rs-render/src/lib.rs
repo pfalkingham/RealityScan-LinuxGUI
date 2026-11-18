@@ -8,7 +8,7 @@
 mod camera;
 mod frustum;
 
-pub use camera::OrbitCamera;
+pub use camera::{OrbitCamera, ViewPreset};
 pub use frustum::{Pose, frustum_lines};
 
 use glam::{Mat4, Vec3};

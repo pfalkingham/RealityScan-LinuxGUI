@@ -13,7 +13,7 @@ use gtk4 as gtk;
 use glam::{Mat3, Mat4, Vec3};
 use gtk::glib;
 use gtk::prelude::*;
-use rs_render::{MeshPart, OrbitCamera, Pose, Renderer, Segment, TextureUpload};
+use rs_render::{MeshPart, OrbitCamera, Pose, Renderer, Segment, TextureUpload, ViewPreset};
 use rs_scene::mesh::Mesh;
 use rs_scene::region::Region;
 use rs_scene::sparse::{CameraPose, SparseCloud};
@@ -23,6 +23,11 @@ const PICK_RADIUS: f64 = 14.0;
 const CAMERA_COLOR: [u8; 3] = [255, 200, 60];
 const SELECTED_CAMERA_COLOR: [u8; 3] = [255, 255, 255];
 const REGION_COLOR: [u8; 3] = [80, 200, 255];
+/// The region's bottom face (local −Z): the face "Set ground from region" puts on the ground.
+const GROUND_FACE_COLOR: [u8; 3] = [255, 165, 40];
+const GROUND_GRID_COLOR: [u8; 3] = [150, 100, 35];
+/// Grid cells along each side of the ground face.
+const GROUND_GRID_CELLS: usize = 4;
 const CONTROL_POINT_COLOR: [u8; 3] = [255, 90, 220];
 const HANDLE_COLOR: [u8; 3] = [160, 230, 255];
 const HOVER_COLOR: [u8; 3] = [255, 255, 255];
@@ -55,7 +60,14 @@ enum Handle {
     Face { axis: usize, positive: bool },
     /// Box centre; dragging it moves the whole box in the view plane.
     Centre,
+    /// Ring around the box's local `axis`; dragging it turns the box about that axis
+    /// (Ctrl snaps to 15°).
+    Ring { axis: usize },
 }
+
+/// Ring colours per local axis (X red, Y green, Z blue), as gizmos usually are.
+const RING_COLORS: [[u8; 3]; 3] = [[235, 90, 90], [110, 210, 110], [100, 150, 255]];
+const RING_SEGMENTS: usize = 64;
 
 struct RegionDrag {
     handle: Handle,
@@ -69,6 +81,13 @@ struct RegionDrag {
     world_per_px: f32,
     right: Vec3,
     up: Vec3,
+    /// Ring drags: the box centre on screen, the pointer's start angle around it, the
+    /// world rotation axis and whether it points towards the viewer.
+    centre_px: (f64, f64),
+    start_angle: f64,
+    towards_viewer: bool,
+    /// Snap rotations to 15° (Ctrl held).
+    snap: bool,
 }
 
 #[derive(Clone)]
@@ -94,6 +113,7 @@ pub struct Viewport {
     on_cameras_lassoed: CamerasLassoed,
     on_edit: EditRequested,
     on_point_picked: PointPicked,
+    ortho_toggle: gtk::ToggleButton,
 }
 
 /// A camera as drawn: RealityScan index, centre, pose and frustum depth.
@@ -283,13 +303,67 @@ fn region_handles(r: &Region) -> Vec<(Handle, Vec3)> {
     out
 }
 
+/// Radius of the rotation rings: just outside the box's circumscribed sphere.
+fn ring_radius(r: &Region) -> f32 {
+    let diag = (r.size[0] * r.size[0] + r.size[1] * r.size[1] + r.size[2] * r.size[2]).sqrt() as f32;
+    (diag * 0.5 * 1.08).max(1e-3)
+}
+
+/// Points around the ring about local `axis` (closed: the first point is repeated).
+fn ring_points(r: &Region, axis: usize) -> Vec<Vec3> {
+    let axes = region_axes(r);
+    let (u, v) = (axes[(axis + 1) % 3], axes[(axis + 2) % 3]);
+    let (c, rad) = (region_centre(r), ring_radius(r));
+    (0..=RING_SEGMENTS)
+        .map(|i| {
+            let a = i as f32 / RING_SEGMENTS as f32 * std::f32::consts::TAU;
+            c + (u * a.cos() + v * a.sin()) * rad
+        })
+        .collect()
+}
+
+/// Rotation matrix (row-major) for `angle` radians about the unit vector `n`.
+fn axis_angle_matrix(n: Vec3, angle: f64) -> [[f64; 3]; 3] {
+    let m = Mat3::from_axis_angle(n.normalize(), angle as f32);
+    [0, 1, 2].map(|i| [0, 1, 2].map(|j| m.col(j)[i] as f64))
+}
+
+fn mat_mul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+        }
+    }
+    out
+}
+
 /// Edges of the region box plus its handles (a small square per face, a cross at the centre).
 fn region_segments(r: &Region, hover: Option<Handle>, with_handles: bool) -> Vec<Segment> {
     let corners = r.corners().map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32));
+    // Corners 0–3 have local z = −½: the bottom face. Its edges get their own colour and a grid
+    // fills it, so it reads as the floor the ground plane will be set on.
     let mut out: Vec<Segment> = Region::EDGES
         .iter()
-        .map(|&(a, b)| Segment { a: corners[a], b: corners[b], color: REGION_COLOR })
+        .map(|&(a, b)| {
+            let color = if a < 4 && b < 4 { GROUND_FACE_COLOR } else { REGION_COLOR };
+            Segment { a: corners[a], b: corners[b], color }
+        })
         .collect();
+    for i in 1..GROUND_GRID_CELLS {
+        let t = i as f32 / GROUND_GRID_CELLS as f32;
+        // Lines parallel to local X (between the −Y and +Y edges) and to local Y.
+        out.push(Segment {
+            a: corners[0].lerp(corners[2], t),
+            b: corners[1].lerp(corners[3], t),
+            color: GROUND_GRID_COLOR,
+        });
+        out.push(Segment {
+            a: corners[0].lerp(corners[1], t),
+            b: corners[2].lerp(corners[3], t),
+            color: GROUND_GRID_COLOR,
+        });
+    }
     if !with_handles {
         return out;
     }
@@ -311,7 +385,13 @@ fn region_segments(r: &Region, hover: Option<Handle>, with_handles: bool) -> Vec
                     out.push(Segment { a: pos - a * h, b: pos + a * h, color });
                 }
             }
+            Handle::Ring { .. } => {}
         }
+    }
+    for (axis, ring_color) in RING_COLORS.into_iter().enumerate() {
+        let color = if hover == Some(Handle::Ring { axis }) { HOVER_COLOR } else { ring_color };
+        let pts = ring_points(r, axis);
+        out.extend(pts.windows(2).map(|w| Segment { a: w[0], b: w[1], color }));
     }
     out
 }
@@ -322,6 +402,14 @@ fn rebuild_region(st: &mut State) {
         None => Vec::new(),
     };
     st.dirty_lines = true;
+}
+
+/// Distance from `p` to the segment `a`–`b` (pixels).
+fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (vx, vy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = vx * vx + vy * vy;
+    let t = if len2 > 0.0 { (((p.0 - a.0) * vx + (p.1 - a.1) * vy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    (p.0 - a.0 - t * vx).hypot(p.1 - a.1 - t * vy)
 }
 
 /// World point to logical pixels, if in front of the eye.
@@ -455,7 +543,36 @@ impl Viewport {
         lasso_toggle.set_tooltip_text(Some(
             "Lasso: drag around triangles (mesh) or cameras (points) to select them.\nShift adds, Ctrl removes, a click clears.",
         ));
+        // View: projection and the standard axis views.
+        let view_menu = gtk::MenuButton::builder()
+            .icon_name("view-reveal-symbolic")
+            .tooltip_text("View direction and projection")
+            .build();
+        let view_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        let ortho_toggle = gtk::ToggleButton::with_label("Parallel projection");
+        ortho_toggle.set_tooltip_text(Some("Orthographic view without perspective (numpad 5)"));
+        view_box.append(&ortho_toggle);
+        let grid = gtk::Grid::builder().row_spacing(3).column_spacing(3).column_homogeneous(true).build();
+        let presets = [
+            ("Top", ViewPreset::Top, "numpad 7"),
+            ("Bottom", ViewPreset::Bottom, "Ctrl+numpad 7"),
+            ("Front", ViewPreset::Front, "numpad 1"),
+            ("Back", ViewPreset::Back, "Ctrl+numpad 1"),
+            ("Left", ViewPreset::Left, "Ctrl+numpad 3"),
+            ("Right", ViewPreset::Right, "numpad 3"),
+        ];
+        let mut preset_buttons = Vec::new();
+        for (i, (label, preset, key)) in presets.into_iter().enumerate() {
+            let b = gtk::Button::with_label(label);
+            b.set_tooltip_text(Some(key));
+            grid.attach(&b, (i % 2) as i32, (i / 2) as i32, 1, 1);
+            preset_buttons.push((b, preset));
+        }
+        view_box.append(&grid);
+        let view_popover = gtk::Popover::builder().child(&view_box).build();
+        view_menu.set_popover(Some(&view_popover));
         bar.append(&reset);
+        bar.append(&view_menu);
         for t in [&points_toggle, &mesh_toggle, &texture_toggle, &cameras_toggle, &region_toggle] {
             bar.append(t);
         }
@@ -515,7 +632,52 @@ impl Viewport {
             on_cameras_lassoed: Rc::new(RefCell::new(None)),
             on_edit: Rc::new(RefCell::new(None)),
             on_point_picked: Rc::new(RefCell::new(None)),
+            ortho_toggle: ortho_toggle.clone(),
         };
+
+        ortho_toggle.connect_toggled({
+            let this = this.clone();
+            move |t| {
+                this.state.borrow_mut().camera.orthographic = t.is_active();
+                this.area.queue_render();
+            }
+        });
+        for (b, preset) in preset_buttons {
+            let this = this.clone();
+            let popover = view_popover.clone();
+            b.connect_clicked(move |_| {
+                popover.popdown();
+                this.set_view_preset(preset);
+            });
+        }
+        // Numpad views (Blender's layout) while the 3D view has the keyboard focus.
+        this.area.set_focusable(true);
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let this = this.clone();
+            move |_, key, _, mods| {
+                use gtk::gdk::Key;
+                let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let preset = match key {
+                    Key::KP_7 | Key::KP_Home => Some(if ctrl { ViewPreset::Bottom } else { ViewPreset::Top }),
+                    Key::KP_1 | Key::KP_End => Some(if ctrl { ViewPreset::Back } else { ViewPreset::Front }),
+                    Key::KP_3 | Key::KP_Next => Some(if ctrl { ViewPreset::Left } else { ViewPreset::Right }),
+                    Key::KP_5 | Key::KP_Begin => {
+                        this.toggle_orthographic();
+                        return gtk::glib::Propagation::Stop;
+                    }
+                    _ => None,
+                };
+                match preset {
+                    Some(p) => {
+                        this.set_view_preset(p);
+                        gtk::glib::Propagation::Stop
+                    }
+                    None => gtk::glib::Propagation::Proceed,
+                }
+            }
+        });
+        this.area.add_controller(keys);
 
         this.lasso_toggle.connect_toggled({
             let this = this.clone();
@@ -797,6 +959,7 @@ impl Viewport {
         drag.connect_drag_begin({
             let this = this.clone();
             move |gesture, x, y| {
+                this.area.grab_focus();
                 let left = gesture.current_button() == 1;
                 let lasso = left && this.state.borrow().lasso_mode;
                 let handle = if left && !lasso { this.pick_handle(x, y) } else { None };
@@ -833,7 +996,8 @@ impl Viewport {
                     this.lasso_layer.queue_draw();
                     return;
                 }
-                if st.region_drag.is_some() {
+                if let Some(drag) = st.region_drag.as_mut() {
+                    drag.snap = gesture.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
                     Viewport::update_region_drag(&mut st, (x, y));
                     drop(st);
                     this.area.queue_render();
@@ -1067,7 +1231,10 @@ impl Viewport {
         if st.mesh.is_none()
             && let Some((lo, hi)) = focus
         {
-            st.camera = OrbitCamera::framing(lo, hi, st.camera.up);
+            st.camera = OrbitCamera {
+                orthographic: st.camera.orthographic,
+                ..OrbitCamera::framing(lo, hi, st.camera.up)
+            };
         }
         st.positions = positions;
         st.colors = cloud.colors.clone();
@@ -1121,6 +1288,9 @@ impl Viewport {
     pub fn script_region_drag(&self, handle: &str, dx: f64, dy: f64) {
         let handle = match handle {
             "centre" | "center" => Handle::Centre,
+            "ring-x" => Handle::Ring { axis: 0 },
+            "ring-y" => Handle::Ring { axis: 1 },
+            "ring-z" => Handle::Ring { axis: 2 },
             h => {
                 let (positive, axis) = match h.as_bytes() {
                     [sign, axis] => (*sign != b'-', (*axis as char).to_ascii_lowercase()),
@@ -1139,10 +1309,12 @@ impl Viewport {
             let mut st = self.state.borrow_mut();
             let Some((vp, w, h)) = self.view_projection(&st) else { return };
             let Some(pos) = st.region_model.as_ref().and_then(|r| {
-                region_handles(r)
-                    .into_iter()
-                    .find(|(hh, _)| *hh == handle)
-                    .and_then(|(_, p)| to_pixels(&vp, p, w, h))
+                let p = match handle {
+                    // A quarter of the way round the ring, where it is seldom edge-on.
+                    Handle::Ring { axis } => Some(ring_points(r, axis)[RING_SEGMENTS / 8]),
+                    _ => region_handles(r).into_iter().find(|(hh, _)| *hh == handle).map(|(_, p)| p),
+                };
+                p.and_then(|p| to_pixels(&vp, p, w, h))
             }) else {
                 return;
             };
@@ -1178,6 +1350,21 @@ impl Viewport {
                 best = Some((d, handle));
             }
         }
+        if best.is_some() {
+            // Face and centre handles win over a ring passing nearby.
+            return best.map(|(_, h)| h);
+        }
+        for axis in 0..3 {
+            let pts: Vec<_> =
+                ring_points(region, axis).into_iter().map(|p| to_pixels(&vp, p, w, h)).collect();
+            for pair in pts.windows(2) {
+                let (Some(a), Some(b)) = (pair[0], pair[1]) else { continue };
+                let d = point_segment_distance((x, y), a, b);
+                if d <= PICK_RADIUS * 0.7 && best.is_none_or(|(bd, _)| d < bd) {
+                    best = Some((d, Handle::Ring { axis }));
+                }
+            }
+        }
         best.map(|(_, h)| h)
     }
 
@@ -1197,12 +1384,16 @@ impl Viewport {
                 (dir, ((b.0 - a.0) / len as f64, (b.1 - a.1) / len as f64))
             }
             Handle::Centre => (Vec3::ZERO, (0.0, 0.0)),
+            Handle::Ring { axis } => (axes[axis], (0.0, 0.0)),
         };
         let view = st.camera.view();
+        let centre_px = to_pixels(&vp, centre, w, h)?;
+        let start_angle = (pointer.1 - centre_px.1).atan2(pointer.0 - centre_px.0);
+        let towards_viewer = view.transform_vector3(axis).z >= 0.0;
         let right = Vec3::new(view.x_axis.x, view.y_axis.x, view.z_axis.x);
         let up = Vec3::new(view.x_axis.y, view.y_axis.y, view.z_axis.y);
         let depth = -view.transform_point3(centre).z;
-        let world_per_px = 2.0 * depth.max(1e-3) * (st.camera.fov_y * 0.5).tan() / h as f32;
+        let world_per_px = st.camera.world_per_pixel(depth, h as f32);
         Some(RegionDrag {
             handle,
             start: region,
@@ -1212,6 +1403,10 @@ impl Viewport {
             world_per_px,
             right,
             up,
+            centre_px,
+            start_angle,
+            towards_viewer,
+            snap: false,
         })
     }
 
@@ -1242,6 +1437,23 @@ impl Viewport {
                     region.centre[k] = drag.start.centre[k] + shift[k] as f64;
                 }
             }
+            Handle::Ring { .. } => {
+                let (cx, cy) = drag.centre_px;
+                if (pointer.0 - cx).hypot(pointer.1 - cy) < 4.0 {
+                    return;
+                }
+                // Screen angles grow clockwise (y points down); a rotation about an axis that
+                // points at the viewer turns counter-clockwise on screen.
+                let mut delta = (pointer.1 - cy).atan2(pointer.0 - cx) - drag.start_angle;
+                delta =
+                    (delta + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                let mut angle = if drag.towards_viewer { -delta } else { delta };
+                if drag.snap {
+                    let step = 15f64.to_radians();
+                    angle = (angle / step).round() * step;
+                }
+                region.set_rotation(mat_mul(axis_angle_matrix(drag.axis, angle), drag.start.rotation()));
+            }
         }
         st.region_model = Some(region);
         rebuild_region(st);
@@ -1258,7 +1470,10 @@ impl Viewport {
             if let Some((lo, hi)) = mesh.bounds()
                 && !previous.is_some_and(|old| similar_extent(old, (lo, hi)))
             {
-                st.camera = OrbitCamera::framing(Vec3::from(lo), Vec3::from(hi), st.camera.up);
+                st.camera = OrbitCamera {
+                    orthographic: st.camera.orthographic,
+                    ..OrbitCamera::framing(Vec3::from(lo), Vec3::from(hi), st.camera.up)
+                };
             }
             st.mesh = Some(mesh);
             st.dirty_mesh = true;
@@ -1466,6 +1681,21 @@ impl Viewport {
         self.area.queue_render();
     }
 
+    /// Look along a world axis (Top, Front, …), keeping the target and zoom.
+    pub fn set_view_preset(&self, preset: ViewPreset) {
+        self.state.borrow_mut().camera.set_preset(preset);
+        self.area.queue_render();
+    }
+
+    /// Switch between perspective and parallel projection.
+    pub fn toggle_orthographic(&self) {
+        self.ortho_toggle.set_active(!self.ortho_toggle.is_active());
+    }
+
+    pub fn set_orthographic(&self, on: bool) {
+        self.ortho_toggle.set_active(on);
+    }
+
     /// Orbit by `dx`/`dy` pixels and zoom by `factor` (for scripted views).
     pub fn nudge(&self, dx: f32, dy: f32, factor: f32) {
         let mut st = self.state.borrow_mut();
@@ -1483,7 +1713,10 @@ impl Viewport {
             _ => st.focus,
         };
         if let Some((lo, hi)) = bounds {
-            st.camera = OrbitCamera::framing(lo, hi, st.camera.up);
+            st.camera = OrbitCamera {
+                orthographic: st.camera.orthographic,
+                ..OrbitCamera::framing(lo, hi, st.camera.up)
+            };
         }
         drop(st);
         self.area.queue_render();
@@ -1550,5 +1783,37 @@ mod tests {
         };
         assert_eq!(nearest_normal(&mesh, Vec3::new(4.0, 0.2, 0.0)), Vec3::Y);
         assert_eq!(nearest_normal(&Mesh::default(), Vec3::ZERO), Vec3::Z);
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    #[test]
+    fn ground_face_is_the_local_bottom() {
+        let r = Region::new([0.0, 0.0, 5.0], [2.0, 4.0, 10.0], [0.0; 3]);
+        let segs = region_segments(&r, None, false);
+        let ground: Vec<_> = segs.iter().filter(|s| s.color == GROUND_FACE_COLOR).collect();
+        assert_eq!(ground.len(), 4);
+        assert!(ground.iter().all(|s| s.a.z.abs() < 1e-5 && s.b.z.abs() < 1e-5));
+        let grid = segs.iter().filter(|s| s.color == GROUND_GRID_COLOR).count();
+        assert_eq!(grid, 2 * (GROUND_GRID_CELLS - 1));
+    }
+
+    #[test]
+    fn ring_rotation_turns_about_the_local_axis() {
+        let start = Region::new([1.0, 2.0, 3.0], [2.0, 3.0, 4.0], [30.0, 10.0, -20.0]);
+        for axis in 0..3 {
+            let n = region_axes(&start)[axis];
+            let mut r = start.clone();
+            r.set_rotation(mat_mul(axis_angle_matrix(n, 0.7), start.rotation()));
+            let after = region_axes(&r);
+            // The ring's own axis stays put, the other two turn by the angle.
+            assert!((after[axis] - n).length() < 1e-4, "axis {axis}");
+            let other = (axis + 1) % 3;
+            let cos = after[other].dot(region_axes(&start)[other]);
+            assert!((cos - 0.7f32.cos()).abs() < 1e-4, "axis {axis}: cos {cos}");
+        }
     }
 }

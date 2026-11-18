@@ -23,6 +23,7 @@ use rs_scene::controlpoints::ControlPointData;
 use rs_scene::export::ModelExportOptions;
 use rs_scene::mesh::Mesh;
 use rs_scene::ortho::{OrthoProjection, OrthoRequest};
+use rs_scene::region::GroundFrame;
 use rs_scene::region::Region;
 use rs_scene::sparse::{CameraPose, SparseCloud};
 
@@ -241,6 +242,7 @@ pub enum Cmd {
     RemoveMask(String),
     /// Set masks from a folder of `<image stem>.png|jpg|tif` files.
     ImportMasks(PathBuf),
+    /// `exportMasks <folder> <params.xml>`, writing `<image>.<ext>.mask.png` per masked image.
     ExportMasks(PathBuf),
     MaskFromMesh,
     CalculateOrtho(OrthoRequest),
@@ -263,6 +265,10 @@ pub enum Cmd {
     DetectMarkers,
     /// `-update`: rigidly fit components and models to the control points and constraints.
     UpdateAlignment,
+    /// `setGroundPlaneFromReconstructionRegion`: level and centre the scene on the region.
+    GroundFromRegion,
+    /// `resetGround`: undo ground plane changes.
+    ResetGround,
     MergeComponents,
     ExportComponent {
         component: String,
@@ -435,6 +441,12 @@ struct State {
     /// failures (RealityScan can't export the region while an imported or preview model is
     /// selected) keep the region on screen instead of fitting a new one.
     region_known: std::collections::HashSet<String>,
+    /// Ground plane per component GUID (see [`GroundFrame`]): `.rsbox` files are in
+    /// RealityScan's internal frame, everything else in the grounded one. Read from
+    /// `ground.json` on first use; components missing there are taken as never grounded.
+    grounds: Option<std::collections::HashMap<String, GroundFrame>>,
+    /// Selected component of the last scene read (for ground changes).
+    last_scene_component: Option<String>,
     /// The ortho template failed because the project has no ortho projections; don't ask again
     /// until a project is opened or an ortho projection is calculated (each failed query is a
     /// failed process with an error event).
@@ -618,6 +630,35 @@ async fn session_loop(
                                 }
                             }
                             "MESH_EDITED" => st.mesh_for = None,
+                            "GROUND_SET" => {
+                                let path = cache_dir("regions").join("ground.rsbox");
+                                match rs_scene::region::load_rsbox(&path) {
+                                    Ok(region) => {
+                                        let comp = if region.owner.is_empty() {
+                                            st.last_scene_component.clone()
+                                        } else {
+                                            Some(region.owner.clone())
+                                        };
+                                        if let Some(comp) = comp {
+                                            set_ground(send, &mut st, &comp, GroundFrame::from_region(&region));
+                                        }
+                                    }
+                                    Err(e) => send(Msg::Log(format!("Couldn't read the ground region: {e}"))),
+                                }
+                                st.region_for = None;
+                                st.mesh_for = None;
+                                st.last_sparse = None;
+                                send(Msg::Log("Ground plane set: the region is now level at the origin".into()));
+                            }
+                            "GROUND_RESET" => {
+                                if let Some(comp) = st.last_scene_component.clone() {
+                                    set_ground(send, &mut st, &comp, GroundFrame::IDENTITY);
+                                }
+                                st.region_for = None;
+                                st.mesh_for = None;
+                                st.last_sparse = None;
+                                send(Msg::Log("Ground plane reset".into()));
+                            }
                             "RUN_DONE" => send(Msg::Log("Workflow finished: aligned, modelled and textured".into())),
                             _ => {}
                         },
@@ -1058,6 +1099,7 @@ async fn sync_exports(client: &Client, send: &impl Fn(Msg), st: &mut State, forc
     // has no region yet (see `fail_stale_exports`), which must not cost the mesh.
     let mut region_cmds = Vec::new();
     let mut region_job = None;
+    st.last_scene_component = scene.project.selected_component().map(str::to_owned);
     match scene.project.selected_component() {
         Some(comp) => {
             let want = (comp.to_owned(), scene.project.change_count);
@@ -1343,6 +1385,72 @@ async fn load_pending_mesh(send: &impl Fn(Msg), st: &mut State) {
     }
 }
 
+/// Settings file for `exportMasks`. The command needs one (a single argument is taken as the
+/// settings file, not the folder), the GUI's dialog can't save one, and the options it might
+/// hold are unknown; an empty generic `Configuration` loads and exports with the defaults:
+/// 8-bit greyscale PNGs at full image size, white = keep.
+fn write_mask_export_params() -> Result<String, String> {
+    let dir = cache_dir("settings");
+    let path = dir.join("mask-export.xml");
+    std::fs::create_dir_all(&dir)
+        .and_then(|_| {
+            std::fs::write(
+                &path,
+                "<Configuration id=\"{00000000-0000-0000-0000-000000000000}\">\n</Configuration>\n",
+            )
+        })
+        .map_err(|e| e.to_string())?;
+    to_wine(&path).map_err(|e| e.to_string())
+}
+
+fn grounds_path() -> PathBuf {
+    cache_dir("regions").join("ground.json")
+}
+
+/// The ground plane set on component `comp` through this app (identity if never).
+fn ground_for(st: &mut State, comp: &str) -> GroundFrame {
+    let grounds = st.grounds.get_or_insert_with(|| {
+        let text = std::fs::read_to_string(grounds_path()).unwrap_or_default();
+        let raw: std::collections::HashMap<String, Vec<f64>> =
+            serde_json::from_str(&text).unwrap_or_default();
+        raw.into_iter()
+            .filter(|(_, v)| v.len() == 12)
+            .map(|(k, v)| {
+                let rotation = [[v[0], v[1], v[2]], [v[3], v[4], v[5]], [v[6], v[7], v[8]]];
+                (k, GroundFrame { rotation, origin: [v[9], v[10], v[11]] })
+            })
+            .collect()
+    });
+    grounds.get(comp).copied().unwrap_or_default()
+}
+
+fn set_ground(send: &impl Fn(Msg), st: &mut State, comp: &str, frame: GroundFrame) {
+    ground_for(st, comp);
+    let grounds = st.grounds.get_or_insert_default();
+    if frame.is_identity() {
+        grounds.remove(comp);
+    } else {
+        grounds.insert(comp.to_owned(), frame);
+    }
+    let raw: std::collections::HashMap<&String, Vec<f64>> = grounds
+        .iter()
+        .map(|(k, g)| (k, g.rotation.iter().flatten().chain(&g.origin).copied().collect()))
+        .collect();
+    let path = grounds_path();
+    let written = std::fs::create_dir_all(cache_dir("regions"))
+        .map_err(|e| e.to_string())
+        .and_then(|_| serde_json::to_string(&raw).map_err(|e| e.to_string()))
+        .and_then(|text| std::fs::write(&path, text).map_err(|e| e.to_string()));
+    if let Err(e) = written {
+        send(Msg::Log(format!("Couldn't save the ground plane: {e}")));
+    }
+}
+
+/// The component the displayed region belongs to.
+fn region_component(st: &State) -> Option<String> {
+    st.region_for.as_ref().map(|(c, _)| c.clone())
+}
+
 fn load_pending_region(send: &impl Fn(Msg), st: &mut State) {
     let Some((comp, change, path)) = st.pending_region.take() else { return };
     // Either way this project state is dealt with; an unreadable file is not retried until
@@ -1350,8 +1458,9 @@ fn load_pending_region(send: &impl Fn(Msg), st: &mut State) {
     st.region_for = Some((comp.clone(), change));
     match rs_scene::region::load_rsbox(&path) {
         Ok(region) => {
+            let shown = ground_for(st, &comp).to_display(&region);
             st.region_known.insert(comp);
-            send(Msg::Region(Some(region)));
+            send(Msg::Region(Some(shown)));
         }
         Err(e) => send(Msg::Log(format!("Couldn't read the reconstruction region: {e}"))),
     }
@@ -1413,6 +1522,7 @@ fn describe(cmd: &Cmd) -> &'static str {
         Cmd::DefineDistance { .. } | Cmd::DeleteConstraint(_) => "the constraint change",
         Cmd::DetectMarkers => "marker detection",
         Cmd::UpdateAlignment => "the alignment update",
+        Cmd::GroundFromRegion | Cmd::ResetGround => "the ground plane change",
         Cmd::MergeComponents | Cmd::ExportComponent { .. } | Cmd::ImportComponent(_) => {
             "the component change"
         }
@@ -1868,6 +1978,12 @@ async fn handle_cmd(cmd: Cmd, client: &Client, send: &impl Fn(Msg), st: &mut Sta
             }
         }
         Cmd::SetRegion(region) => {
+            let owner =
+                if region.owner.is_empty() { region_component(st) } else { Some(region.owner.clone()) };
+            let region = match owner {
+                Some(comp) => ground_for(st, &comp).to_internal(&region),
+                None => region,
+            };
             let dir = cache_dir("regions");
             let path = dir.join("set.rsbox");
             let prepared = std::fs::create_dir_all(&dir)
@@ -2248,25 +2364,28 @@ async fn handle_cmd(cmd: Cmd, client: &Client, send: &impl Fn(Msg), st: &mut Sta
             send(Msg::Log(format!("Setting masks for {found} image(s) from {}", folder.display())));
             client.send(&seq).await.map(|_| ())
         }
-        Cmd::ExportMasks(folder) => match to_wine(&folder) {
-            Ok(w) => {
-                send(Msg::Log(format!("Exporting masks to {}…", folder.display())));
-                st.pending_export = Some(folder);
-                st.pending_since = Some(std::time::Instant::now());
-                client
-                    .send(
-                        &CommandSeq::new()
-                            .then(Command::new("exportMasks").arg(w))
-                            .then(Command::tag("EXPORT_DONE")),
-                    )
-                    .await
-                    .map(|_| ())
+        Cmd::ExportMasks(folder) => {
+            match (to_wine(&folder).map_err(|e| e.to_string()), write_mask_export_params()) {
+                (Ok(w), Ok(p)) => {
+                    send(Msg::Log(format!("Exporting masks to {}…", folder.display())));
+                    // The folder is the result: report it once the tag arrives.
+                    st.pending_export = Some(folder);
+                    st.pending_since = Some(std::time::Instant::now());
+                    client
+                        .send(
+                            &CommandSeq::new()
+                                .then(Command::new("exportMasks").arg(w).arg(p))
+                                .then(Command::tag("EXPORT_DONE")),
+                        )
+                        .await
+                        .map(|_| ())
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    send(Msg::Log(format!("Can't export masks: {e}")));
+                    return;
+                }
             }
-            Err(e) => {
-                send(Msg::Log(format!("Can't export to {}: {e}", folder.display())));
-                return;
-            }
-        },
+        }
         Cmd::MaskFromMesh => {
             send(Msg::Log("Generating masks from the selected model…".into()));
             client
@@ -2278,8 +2397,16 @@ async fn handle_cmd(cmd: Cmd, client: &Client, send: &impl Fn(Msg), st: &mut Sta
                 .await
                 .map(|_| ())
         }
-        Cmd::CalculateOrtho(req) => {
+        Cmd::CalculateOrtho(mut req) => {
             st.orthos_unavailable = false;
+            let owner = if req.region.owner.is_empty() {
+                region_component(st)
+            } else {
+                Some(req.region.owner.clone())
+            };
+            if let Some(comp) = owner {
+                req.region = ground_for(st, &comp).to_internal(&req.region);
+            }
             let dir = cache_dir("ortho");
             let path = dir.join("request.rsortho");
             let prepared = std::fs::create_dir_all(&dir)
@@ -2396,6 +2523,41 @@ async fn handle_cmd(cmd: Cmd, client: &Client, send: &impl Fn(Msg), st: &mut Sta
                 .send(&CommandSeq::new().then(Command::new("update")).then(Command::tag("UPDATE_DONE")))
                 .await
                 .map(|_| ())
+        }
+        Cmd::GroundFromRegion | Cmd::ResetGround => {
+            let mut seq = CommandSeq::new();
+            if matches!(cmd, Cmd::GroundFromRegion) {
+                send(Msg::Log("Setting the ground plane from the region…".into()));
+                // The region RealityScan levels on, in its internal frame: the new ground
+                // frame follows from it (read when GROUND_SET arrives).
+                let dir = cache_dir("regions");
+                let path = dir.join("ground.rsbox");
+                let _ = std::fs::remove_file(&path);
+                match std::fs::create_dir_all(&dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| to_wine(&path).map_err(|e| e.to_string()))
+                {
+                    Ok(w) => {
+                        seq = seq
+                            .then(Command::new("exportReconstructionRegion").arg(w))
+                            .then(Command::new("setGroundPlaneFromReconstructionRegion"))
+                            .then(Command::tag("GROUND_SET"));
+                    }
+                    Err(e) => {
+                        send(Msg::Log(format!("Can't set the ground plane: {e}")));
+                        return;
+                    }
+                }
+            } else {
+                send(Msg::Log("Resetting the ground plane…".into()));
+                seq = seq.then(Command::new("resetGround")).then(Command::tag("GROUND_RESET"));
+            }
+            // The scene moves: everything shown must be read again.
+            st.mesh_for = None;
+            st.last_sparse = None;
+            st.region_for = None;
+            forget_all_display_files();
+            client.send(&seq).await.map(|_| ())
         }
         Cmd::MergeComponents => {
             send(Msg::Log("Merging components…".into()));

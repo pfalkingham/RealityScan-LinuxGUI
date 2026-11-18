@@ -82,6 +82,8 @@ const PIPELINE_ACTIONS: &[&str] = &[
     "export-model",
     "region-auto",
     "region-density",
+    "ground-from-region",
+    "reset-ground",
 ];
 /// Subset of the above that needs a model.
 const MODEL_ACTIONS: &[&str] = &[
@@ -105,6 +107,8 @@ const MODEL_ACTIONS: &[&str] = &[
 ];
 /// Subset that needs an aligned component.
 const COMPONENT_ACTIONS: &[&str] = &[
+    "ground-from-region",
+    "reset-ground",
     "model",
     "model-preview",
     "model-high",
@@ -299,7 +303,8 @@ impl MainWindow {
             selection.append(Some(label), Some(&format!("win.select-triangles::{target}")));
         }
         let selection_apply = gio::Menu::new();
-        selection_apply.append(Some("_Remove Selected Triangles"), Some("win.remove-selected"));
+        selection_apply
+            .append(Some("_Filter Selection (Remove Selected Triangles)"), Some("win.remove-selected"));
         selection.append_section(None, &selection_apply);
         let cut = gio::Menu::new();
         cut.append(Some("Keep Only _Inside the Region"), Some("win.cut-inside"));
@@ -308,7 +313,7 @@ impl MainWindow {
         tools_menu.append_submenu(Some("Select _Triangles"), &selection);
         let lasso = gio::Menu::new();
         lasso.append(Some("_Lasso Tool"), Some("win.lasso-mode"));
-        lasso.append(Some("Remove Lasso-Selected Triangles"), Some("win.lasso-remove"));
+        lasso.append(Some("Filter Lasso Selection (Remove Triangles)"), Some("win.lasso-remove"));
         lasso.append(Some("Keep Only Lasso-Selected Triangles"), Some("win.lasso-keep"));
         lasso.append(Some("Invert Lasso Selection"), Some("win.lasso-invert"));
         lasso.append(Some("Clear Lasso Selection"), Some("win.lasso-clear"));
@@ -330,6 +335,10 @@ impl MainWindow {
         cps.append(Some("Import _Ground Control Points…"), Some("win.import-gcp"));
         cps.append(Some("_Update Alignment to Constraints"), Some("win.update-alignment"));
         tools_menu.append_section(Some("Alignment"), &cps);
+        let ground = gio::Menu::new();
+        ground.append(Some("Set Ground Plane from _Region"), Some("win.ground-from-region"));
+        ground.append(Some("Reset _Ground Plane"), Some("win.reset-ground"));
+        tools_menu.append_section(Some("Ground plane"), &ground);
         let masks = gio::Menu::new();
         masks.append(Some("AI Masks for _Selected Images"), Some("win.generate-masks-selected"));
         masks.append(Some("Generate _AI Masks (all images)"), Some("win.generate-masks"));
@@ -1151,7 +1160,7 @@ impl MainWindow {
                 w.pick_folder_for("Folder with mask images named like the photos", Cmd::ImportMasks)
             }),
         );
-        add("export-masks", &[], Box::new(|w| w.pick_folder_for("Export masks into", Cmd::ExportMasks)));
+        add("export-masks", &[], Box::new(|w| w.export_masks()));
         add("new-ortho", &[], Box::new(|w| w.prompt_ortho()));
         add("new-control-point", &[], Box::new(|w| w.prompt_new_control_point()));
         add("define-distance", &[], Box::new(|w| w.prompt_distance()));
@@ -1161,6 +1170,8 @@ impl MainWindow {
         add("export-component", &[], Box::new(|w| w.pick_component_export()));
         add("import-component", &[], Box::new(|w| w.pick_component_import()));
         add("region-auto", &[], Box::new(|w| w.inner.backend.send(Cmd::RegionAuto)));
+        add("ground-from-region", &[], Box::new(|w| w.inner.backend.send(Cmd::GroundFromRegion)));
+        add("reset-ground", &[], Box::new(|w| w.inner.backend.send(Cmd::ResetGround)));
         add("region-density", &[], Box::new(|w| w.inner.backend.send(Cmd::RegionByDensity)));
         add("abort", &["Escape"], Box::new(|w| w.inner.backend.send(Cmd::Abort)));
         add("refresh", &["F5"], Box::new(|w| w.inner.backend.send(Cmd::Refresh)));
@@ -1810,7 +1821,8 @@ impl MainWindow {
     /// `select-image:<i>`, `camera:<index>` (as if that camera was clicked), `close-popups`,
     /// `orbit:<dx>:<dy>`, `zoom:<factor>`, `reset-view`, `simplify:<n>`, `duplicate`,
     /// `select-model:<name>`, `delete-model:<name>`, `export:<path>` (default options),
-    /// `region-drag:<+x|-x|+y|-y|-z|+z|centre>:<dx>:<dy>` (pixels), `settings:<key>=<value>`,
+    /// `region-drag:<+x|-x|+y|-y|-z|+z|centre|ring-x|ring-y|ring-z>:<dx>:<dy>` (pixels),
+    /// `view-preset:top|bottom|front|back|left|right`, `parallel[:off]`, `export-masks:<dir>`, `settings:<key>=<value>`,
     /// `open-image:<i>`, `back-3d`, `new-point:<name>`, `place:<x>:<y>`, `move:<label>:<dx>:<dy>`,
     /// `define-distance:<a>:<b>:<distance>`.
     fn run_script(&self, script: String) {
@@ -1931,6 +1943,20 @@ impl MainWindow {
                 ("lasso-edit", Some(which)) => this.inner.viewport.edit_selection(which == "keep"),
                 ("lasso-clear", _) => this.inner.viewport.clear_selection(),
                 ("reset-view", _) => this.inner.viewport.reset_view(),
+                ("view-preset", Some(v @ ("top" | "bottom" | "front" | "back" | "left" | "right"))) => {
+                    use rs_render::ViewPreset as P;
+                    let preset = match v {
+                        "top" => P::Top,
+                        "bottom" => P::Bottom,
+                        "front" => P::Front,
+                        "back" => P::Back,
+                        "left" => P::Left,
+                        _ => P::Right,
+                    };
+                    this.inner.viewport.set_view_preset(preset);
+                }
+                ("export-masks", Some(dir)) => this.inner.backend.send(Cmd::ExportMasks(PathBuf::from(dir))),
+                ("parallel", arg) => this.inner.viewport.set_orthographic(arg != Some("off")),
                 ("log", Some(path)) => {
                     // Dump the log pane (headed by the visible view), so a scripted run can be
                     // checked from a file.
@@ -2239,6 +2265,11 @@ impl MainWindow {
                 this.inner.backend.send(make(path));
             }
         });
+    }
+
+    /// Export RealityScan's masks (AI, from mesh or imported) as `<image>.<ext>.mask.png`.
+    fn export_masks(&self) {
+        self.pick_folder_for("Export masks into", Cmd::ExportMasks);
     }
 
     /// Dialog for a new orthographic projection of the selected model.

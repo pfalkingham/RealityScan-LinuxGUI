@@ -63,6 +63,24 @@ impl RegionPanel {
         presets.append(&auto);
         presets.append(&density);
 
+        // Ground plane: turn the box (rings in the 3D view or yaw/pitch/roll here) so its
+        // bottom lies on the ground, then make that the scene's ground.
+        let ground = gtk::Button::builder()
+            .label("Set ground from region")
+            .action_name("win.ground-from-region")
+            .hexpand(true)
+            .build();
+        ground.set_tooltip_text(Some(
+            "Level and centre the scene on the region (RealityScan's “Set Ground by Reconstruction Region”).\nTurn the box first with the rings in the 3D view so it sits square on the ground.",
+        ));
+        let reset_ground =
+            gtk::Button::builder().label("Reset ground").action_name("win.reset-ground").build();
+        reset_ground.set_tooltip_text(Some("Put the ground plane back where alignment left it"));
+        let ground_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        ground_row.add_css_class("linked");
+        ground_row.append(&ground);
+        ground_row.append(&reset_ground);
+
         let apply = gtk::Button::builder().label("Apply").halign(gtk::Align::End).sensitive(false).build();
         apply.add_css_class("suggested-action");
         let info = gtk::Label::builder().xalign(0.0).wrap(true).max_width_chars(36).build();
@@ -84,6 +102,8 @@ impl RegionPanel {
         content.append(&grid);
         content.append(&info);
         content.append(&apply);
+        content.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        content.append(&ground_row);
 
         let popover = gtk::Popover::builder().child(&content).build();
         let button = gtk::MenuButton::builder()

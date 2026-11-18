@@ -39,8 +39,22 @@ a camera to select its image. Each model row in the sidebar expands to switches 
 colours and texture, and switching models keeps the current view so detail levels can be
 compared at the same zoom.
 
+The eye button in the toolbar holds the **view** options: parallel (orthographic) projection
+instead of perspective, and the standard views along the axes (top, bottom, front, back, left,
+right). With the 3D view focused the numpad works too: 7 top, 1 front, 3 right, Ctrl+7/1/3 the
+opposite sides, 5 switches between perspective and parallel.
+
 The **reconstruction region** can be fitted automatically, typed in, or dragged in the viewport:
-face handles resize it, the centre handle moves it.
+face handles resize it, the centre handle moves it, and the three rings around it turn it about
+its own axes (Ctrl snaps to 15°).
+
+The **ground plane** levels a skewed scene. The region's bottom face is drawn in orange with a
+grid: that is the face that becomes the ground. Turn the box until that face lies on the ground,
+then *Set ground from region* (in the Region panel, or Tools › Ground plane): the box's
+axes become the world axes and the centre of its bottom face the origin, so exports and the 3D
+view use the levelled coordinates. *Reset ground* puts it back. A ground plane set in
+RealityScan's own window isn't known to this app; the region box would then be drawn in the
+wrong place.
 
 ### Control points and scaling
 
@@ -64,13 +78,15 @@ Open an image and press **Mask**: paint over what RealityScan should ignore (lef
 drag or the erase tool puts it back), then Apply. **AI mask** asks RealityScan to isolate the
 subject in that image; the images menu does the same for the selected thumbnails, and Tools ›
 Masks for every image, from the current model, or from a folder of mask images named like the
-photos. RealityScan uses the masks it generates internally but can't export them in a readable
-form yet, so AI masks aren't displayed.
+photos. Tools › Masks › Export Masks writes every mask RealityScan holds (AI, from the model or
+imported) to a folder as `<photo name>.<ext>.mask.png`: greyscale, full size, white = keep. AI
+masks aren't shown in the image view yet.
 
 ### Mesh clean-up
 
 Tools › Select Triangles offers RealityScan's selectors (inside/outside the region, marginal,
-large, largest part, invert) followed by Remove Selected Triangles, or Cut by Region directly;
+large, largest part, invert) followed by *Filter Selection* (RealityScan's name for removing the
+selected triangles), or Cut by Region directly;
 Fill Holes, Smooth, Simplify (to a triangle count or a percentage) and Clean are in the same
 menu. Each filter makes a new model, as in RealityScan.
 
@@ -97,7 +113,8 @@ XMP camera files.
 F9 run the workflow · Ctrl+O open · Ctrl+S save · Ctrl+Shift+S save as · Ctrl+I add images ·
 Ctrl+Shift+I add folder · Ctrl+A / Ctrl+Shift+A select all / no images · Ctrl+E export model ·
 Ctrl+M re-export the mesh for display · Ctrl+L log · Ctrl+R restart RealityScan · F5 refresh ·
-Esc abort · Delete remove lasso selection · Ctrl+Q quit.
+Esc abort · Delete remove lasso selection · Ctrl+Q quit. In the 3D view: numpad 7/1/3 top, front
+and right (with Ctrl the opposite side), numpad 5 perspective/parallel.
 
 ## Performance notes
 
@@ -151,8 +168,8 @@ cargo test && cargo clippy --all-targets
 |---|---|
 | `rs-client` | REST client, CLI command builder, Wine path translation, event receiver |
 | `rs-backend` | Runtime detection (Heroic/Proton, Epic's CrossOver package, distrobox), launching/stopping instances, autosave handling |
-| `rs-scene` | Reads project state back via report templates; PLY/GLB mesh readers, `.rsbox` regions, export settings XML |
-| `rs-render` | OpenGL renderer: points, lines, lit and textured meshes, depth picking |
+| `rs-scene` | Reads project state back via report templates; PLY/GLB mesh readers, `.rsbox` regions and the ground-plane transform, export settings XML |
+| `rs-render` | OpenGL renderer: points, lines, lit and textured meshes, depth picking, perspective/parallel camera |
 | `realityscan-gtk` | The application |
 
 Handy tools and knobs:

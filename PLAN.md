@@ -509,6 +509,38 @@ Images" dialog would settle it.
   repeatable. The image view's markers used to be joined by stray lines (cairo kept the text's
   current point; `new_path` per marker fixes it).
 
+### 3.15 User feedback: views, region rotation, ground plane, masks (2026-11-18)
+
+- **Views**: `OrbitCamera::orthographic` (parallel projection; visible height = the
+  perspective view's height at the target, near plane behind the eye) and
+  `ViewPreset` Top/Bottom/Front/Back/Left/Right (world +Z up, +Y up on screen from above).
+  View menu in the 3D toolbar; numpad 7/1/3 (Ctrl = opposite side), 5 toggles parallel.
+- **Region rotation**: three rings round the region gizmo (local X/Y/Z, red/green/blue);
+  dragging turns the box about that axis, Ctrl snaps to 15°.
+- **YPR convention was wrong** in `region.rs`: measured (rotateReconstructionRegion, then
+  ground plane from the box, then a rigid fit of the sparse cloud before/after) RealityScan
+  uses `R = Rz(−roll) · Ry(−yaw) · Rx(−pitch)` (exact to 1e-5). Single-axis
+  `rotateReconstructionRegion x y z` writes pitch = −x, yaw = −y, roll = −z.
+- **Ground plane**: `setGroundPlaneFromReconstructionRegion` makes the region's axes the
+  world axes and the centre of its bottom face (local −Z) the origin; `resetGround` undoes
+  it. Exports, `$ExportCameras`, the points template all follow the grounded frame, but
+  **`.rsbox` files stay in RealityScan's internal frame** (also `setReconstructionRegionAuto`
+  afterwards). No template exposes the transform, so the app records it per component
+  (`rs_scene::region::GroundFrame`, `~/.cache/realityscan-gtk/regions/ground.json`) from the
+  region exported right before the command, and converts regions both ways (display,
+  `SetRegion`, ortho requests). A ground plane set in RealityScan's own UI is unknown to the
+  app (its region would show in the wrong place). Verified live: round trip exact.
+- **Filter Selection** = `removeSelectedTriangles` (already there): menu items renamed.
+- **Mask export SOLVED**: the GUI's Export Mask Images dialog has no settings to save (just
+  a file picker). A single `exportMasks <x>` argument is read as the *settings file* (the
+  bare-folder form fails with err 5617, and that failure makes RealityScan close the project
+  and unload the plugin). An empty generic settings file works:
+  `<Configuration id="{00000000-0000-0000-0000-000000000000}"></Configuration>` — the same
+  format as `Settings/SimplifiedExport/*.xml` in the install. Output: `<image>.<ext>.mask.png`,
+  8-bit greyscale, full image size, white = keep. The app writes that file itself
+  (`write_mask_export_params`). Verified through the app with AI masks; RealityScan stays up.
+  Next: show RealityScan's masks in the image view (export to the cache, load).
+
 ## 4. Open questions
 
 1. **Licensing/auth headless:** does anything (saving, exporting, large projects) require the
