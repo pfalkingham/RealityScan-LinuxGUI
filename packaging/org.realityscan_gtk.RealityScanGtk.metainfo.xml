@@ -17,8 +17,8 @@
       Epic's Linux package, and an NVIDIA GPU.
     </p>
   </description>
-  <url type="homepage">https://github.com/pfalkingham/realityscan-gtk</url>
-  <url type="bugtracker">https://github.com/pfalkingham/realityscan-gtk/issues</url>
+  <url type="homepage">https://github.com/pfalkingham/RealityScan-LinuxGUI</url>
+  <url type="bugtracker">https://github.com/pfalkingham/RealityScan-LinuxGUI/issues</url>
   <launchable type="desktop-id">org.realityscan_gtk.RealityScanGtk.desktop</launchable>
   <provides>
     <binary>realityscan-gtk</binary>
@@ -29,6 +29,7 @@
   </categories>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-11-20"/>
     <release version="0.1.0" date="2026-11-05"/>
   </releases>
 </component>

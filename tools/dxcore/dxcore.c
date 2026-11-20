@@ -9,7 +9,16 @@
  * QueryInterface(IDXGIAdapter*) with the wrapped DXGI adapter, which is what vkd3d-proton's
  * D3D12CreateDevice needs to pick the right physical device.
  *
- * Based on Wine's dlls/dxcore/dxcore.c (LGPL 2.1+, Copyright (C) 2023 Mohamad Al-Jaf).
+ * Based on Wine's dlls/dxcore/dxcore.c, Copyright (C) 2023 Mohamad Al-Jaf.
+ * Modifications Copyright (C) 2026 Peter Falkingham.
+ *
+ * This library is free software; you can redistribute it and/or modify it under the terms of
+ * the GNU Lesser General Public License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU Lesser General Public License (COPYING in this directory) for more details.
  */
 
 #include <stdarg.h>

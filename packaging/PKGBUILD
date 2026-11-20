@@ -1,14 +1,14 @@
 # Maintainer: Peter Falkingham
 # Build from the local checkout: cd packaging && makepkg -si
 pkgname=realityscan-gtk
-pkgver=0.1.0
+pkgver=0.2.0
 pkgrel=1
 pkgdesc="Native GTK4 front-end for RealityScan running headless under Wine (Heroic/Proton)"
 arch=('x86_64')
-url="https://github.com/pfalkingham/realityscan-gtk"
-license=('MIT')
+url="https://github.com/pfalkingham/RealityScan-LinuxGUI"
+license=('MIT' 'LGPL-2.1-or-later')
 depends=('gtk4' 'libadwaita' 'libepoxy' 'umu-launcher')
-makedepends=('cargo')
+makedepends=('cargo' 'wine' 'clang')
 optdepends=('heroic-games-launcher-bin: installs RealityScan and Proton')
 source=()
 sha256sums=()
@@ -22,6 +22,15 @@ build() {
   cd "$startdir/.."
   export CARGO_TARGET_DIR="$srcdir/target"
   cargo build --frozen --release -p realityscan-gtk
+
+  # dxcore.dll gives RealityScan's AI masking the GPU under Wine/Proton (tools/dxcore).
+  # Built in $srcdir so the checkout stays clean; Wine's debug headers are copied next to it
+  # rather than adding /usr/include, which would pull glibc headers into a Windows build.
+  local dx="$srcdir/dxcore"
+  mkdir -p "$dx/wine"
+  cp /usr/include/wine/debug.h /usr/include/wine/exception.h "$dx/wine/"
+  winegcc -b x86_64-windows -shared -Wall -O2 -I"$dx" -Itools/dxcore \
+    -o "$dx/dxcore.dll" tools/dxcore/dxcore.c tools/dxcore/dxcore.spec
 }
 
 package() {
@@ -33,6 +42,9 @@ package() {
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/org.realityscan_gtk.RealityScanGtk.svg"
   install -Dm644 packaging/org.realityscan_gtk.RealityScanGtk.metainfo.xml \
     "$pkgdir/usr/share/metainfo/org.realityscan_gtk.RealityScanGtk.metainfo.xml"
+  install -Dm644 "$srcdir/dxcore/dxcore.dll" "$pkgdir/usr/share/realityscan-gtk/dxcore.dll"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 tools/dxcore/COPYING "$pkgdir/usr/share/licenses/$pkgname/dxcore-COPYING"
   install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
   install -Dm644 docs/usage.md "$pkgdir/usr/share/doc/$pkgname/usage.md"
 }

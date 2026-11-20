@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "realityscan-gtk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-channel",
  "dirs",
@@ -2168,7 +2168,7 @@ checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 
 [[package]]
 name = "rs-backend"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "rs-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2201,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "rs-render"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "glam",
  "glow",
@@ -2209,7 +2209,7 @@ dependencies = [
 
 [[package]]
 name = "rs-scene"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "image",

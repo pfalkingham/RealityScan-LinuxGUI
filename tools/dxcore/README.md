@@ -20,4 +20,5 @@ cp dxcore.dll "<prefix>/drive_c/windows/system32/dxcore.dll"
 reg.exe add 'HKCU\Software\Wine\DllOverrides' /v dxcore /t REG_SZ /d native /f
 ```
 
-Based on Wine's `dlls/dxcore/dxcore.c` (LGPL 2.1 or later).
+Based on Wine's `dlls/dxcore/dxcore.c`. Unlike the rest of the repository (MIT), this directory
+and the `dxcore.dll` built from it are under the GNU LGPL 2.1 or later; see [COPYING](COPYING).

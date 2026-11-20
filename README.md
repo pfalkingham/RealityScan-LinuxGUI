@@ -67,12 +67,13 @@ sudo apt install cargo libgtk-4-dev libadwaita-1-dev libepoxy-dev
 ```
 
 ```bash
-git clone https://github.com/pfalkingham/realityscan-gtk
-cd realityscan-gtk
+git clone https://github.com/pfalkingham/RealityScan-LinuxGUI
+cd RealityScan-LinuxGUI
 make install            # into ~/.local; PREFIX=/usr/local for system-wide
 ```
 
-`make uninstall` removes it; Arch users can `cd packaging && makepkg -si` instead. To run from
+`make uninstall` removes it; Arch users can `cd packaging && makepkg -si` instead (that also
+builds `dxcore.dll` for GPU AI masking, so it needs `wine` and `clang`). To run from
 the source tree use `cargo run --release` (the debug build is several times slower at decoding
 thumbnails and loading large meshes).
 
@@ -106,4 +107,5 @@ welcome; PLAN.md is where findings about RealityScan's remote interface go.
 
 Not affiliated with or endorsed by Epic Games. RealityScan is Epic's software, installed and
 licensed separately under its own terms; this repository contains no part of it. Licensed under
-the [MIT License](LICENSE).
+the [MIT License](LICENSE), except `tools/dxcore` (and the `dxcore.dll` built from it), which is
+derived from Wine and licensed under the [GNU LGPL 2.1 or later](tools/dxcore/COPYING).
