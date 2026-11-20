@@ -343,8 +343,8 @@ fn visible_handles(r: &Region, vp: &Mat4, w: f64, h: f64) -> Vec<(Handle, Px, Px
         .into_iter()
         .filter_map(|(handle, base, tip)| {
             let (b, t) = (to_pixels(vp, base, w, h)?, to_pixels(vp, tip, w, h)?);
-            let edge_on = matches!(handle, Handle::Face { .. })
-                && (t.0 - b.0).hypot(t.1 - b.1) < HANDLE_MIN_STEM_PX;
+            let edge_on =
+                matches!(handle, Handle::Face { .. }) && (t.0 - b.0).hypot(t.1 - b.1) < HANDLE_MIN_STEM_PX;
             (!edge_on).then_some((handle, b, t))
         })
         .collect()
@@ -609,9 +609,12 @@ fn draw_projection_icon(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f6
         let (fw, fh) = ((x1 - x0) * 0.22, (y1 - y0) * 0.22);
         cr.rectangle(x0, y0, x1 - x0, y1 - y0);
         cr.rectangle(mx - fw, my - fh, fw * 2.0, fh * 2.0);
-        for (ax, ay, bx, by) in
-            [(x0, y0, mx - fw, my - fh), (x1, y0, mx + fw, my - fh), (x1, y1, mx + fw, my + fh), (x0, y1, mx - fw, my + fh)]
-        {
+        for (ax, ay, bx, by) in [
+            (x0, y0, mx - fw, my - fh),
+            (x1, y0, mx + fw, my - fh),
+            (x1, y1, mx + fw, my + fh),
+            (x0, y1, mx - fw, my + fh),
+        ] {
             cr.move_to(ax, ay);
             cr.line_to(bx, by);
         }
@@ -1453,7 +1456,8 @@ impl Viewport {
         cr.set_line_join(gtk::cairo::LineJoin::Round);
 
         if let Some(Handle::Ring { axis }) = active {
-            let pts: Vec<_> = ring_points(region, axis).into_iter().map(|p| to_pixels(&vp, p, w, h)).collect();
+            let pts: Vec<_> =
+                ring_points(region, axis).into_iter().map(|p| to_pixels(&vp, p, w, h)).collect();
             let mut pen_down = false;
             for p in pts {
                 match (p, pen_down) {
@@ -2180,10 +2184,15 @@ mod ring_tests {
     #[test]
     fn handles_facing_the_viewer_are_hidden() {
         let r = Region::new([0.0; 3], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]);
-        let mut cam = OrbitCamera { up: Vec3::Z, orthographic: true, ..OrbitCamera::framing(Vec3::splat(-1.0), Vec3::ONE, Vec3::Z) };
+        let mut cam = OrbitCamera {
+            up: Vec3::Z,
+            orthographic: true,
+            ..OrbitCamera::framing(Vec3::splat(-1.0), Vec3::ONE, Vec3::Z)
+        };
         cam.set_preset(ViewPreset::Front);
         let vp = cam.view_projection(1.0);
-        let handles: Vec<Handle> = visible_handles(&r, &vp, 400.0, 400.0).into_iter().map(|(h, ..)| h).collect();
+        let handles: Vec<Handle> =
+            visible_handles(&r, &vp, 400.0, 400.0).into_iter().map(|(h, ..)| h).collect();
         // Looking along Y: the ±Y face handles point at the viewer; the other four and the
         // centre stand clear of the box outline.
         assert_eq!(handles.len(), 5, "{handles:?}");
