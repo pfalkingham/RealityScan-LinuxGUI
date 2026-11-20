@@ -541,6 +541,32 @@ Images" dialog would settle it.
   (`write_mask_export_params`). Verified through the app with AI masks; RealityScan stays up.
   Next: show RealityScan's masks in the image view (export to the cache, load).
 
+### 3.16 Region gizmo feedback round 2 (2026-11-19)
+
+The rings were liked; the rest of the gizmo needed work:
+
+- **Resize handles** were small squares in the face plane, so looking straight at the box
+  they collapsed onto its edges. They are now screen-space discs (cairo, on the overlay layer
+  that also draws the lasso) on stems standing out of each face by 12 % of the box diagonal,
+  coloured by axis. A face whose stem is shorter than 8 px on screen points at the viewer and
+  is neither drawn nor picked (`visible_handles`). The centre handle is a square.
+- **Accidental region edits while orbiting:** ring picking tightened to 7 px; the hovered
+  ring gets a thick 4 px outlined copy on the overlay and handles grow and turn white, so it is
+  obvious before pressing that a drag will edit the region. GL core lines can't be thick,
+  which is why the highlight lives on the cairo layer.
+- **Ortho:** a visible "Ortho" toggle in the viewport bar (it was hidden in the view menu),
+  remembered in settings under `view-orthographic`.
+- **Axis marker:** the three edges leaving corner 0 (−X, −Y, −Z) start with a red/green/blue
+  stub (30 % of the edge) with X/Y/Z letters, so the orientation that "Set ground from region"
+  will apply is readable. (RealityCapture's own Set Ground only moves the scene; ours sets all
+  three axes from the box, which the user prefers.)
+- **Region hidden by default**; opening the Region panel or running Set Ground from Region
+  switches it on.
+- Follow-up: the projection toggle became an icon button (cairo-drawn frustum / parallel
+  cube) replacing the eye menu, and the axis views moved to a RealityScan-style navigation
+  cube (bottom right, cairo overlay, rotation-only projection of the camera view; each face's
+  label axes come from that preset camera's right/up so text reads upright when you click it).
+
 ## 4. Open questions
 
 1. **Licensing/auth headless:** does anything (saving, exporting, large projects) require the

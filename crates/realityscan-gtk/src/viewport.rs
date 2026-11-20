@@ -3,7 +3,7 @@
 //! Mouse: left-drag orbits, middle- or right-drag pans, wheel zooms, a left click
 //! on a camera selects it (reported through [`Viewport::connect_camera_clicked`]).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,6 +18,10 @@ use rs_scene::mesh::Mesh;
 use rs_scene::region::Region;
 use rs_scene::sparse::{CameraPose, SparseCloud};
 
+/// Side of the navigation cube widget, in logical pixels.
+const NAV_CUBE_SIZE: i32 = 140;
+/// Settings key remembering the parallel-projection toggle.
+const ORTHO_KEY: &str = "view-orthographic";
 /// Click tolerance for picking a camera, in logical pixels.
 const PICK_RADIUS: f64 = 14.0;
 const CAMERA_COLOR: [u8; 3] = [255, 200, 60];
@@ -29,8 +33,22 @@ const GROUND_GRID_COLOR: [u8; 3] = [150, 100, 35];
 /// Grid cells along each side of the ground face.
 const GROUND_GRID_CELLS: usize = 4;
 const CONTROL_POINT_COLOR: [u8; 3] = [255, 90, 220];
-const HANDLE_COLOR: [u8; 3] = [160, 230, 255];
 const HOVER_COLOR: [u8; 3] = [255, 255, 255];
+/// How far the face handles stand off their faces, as a fraction of the box diagonal, so
+/// they stay visible and clear of the box edges when looking straight at a face.
+const HANDLE_STICK_OUT: f32 = 0.12;
+/// Handle discs (drawn in screen space), in logical pixels; hovered ones grow.
+const HANDLE_DISC_RADIUS: f64 = 5.5;
+const HANDLE_HOVER_RADIUS: f64 = 8.5;
+/// Face handles whose stem is shorter than this on screen point at the viewer: they can't be
+/// dragged meaningfully, so they are neither drawn nor picked.
+const HANDLE_MIN_STEM_PX: f64 = 8.0;
+/// Pick tolerance for the rotation rings, in logical pixels (kept tight so an orbit that
+/// starts near a ring doesn't turn the box by accident).
+const RING_PICK_RADIUS: f64 = 7.0;
+/// Length of the coloured local-axis markers at the box's (−X, −Y, −Z) corner, as a fraction
+/// of each edge.
+const AXIS_MARKER_FRACTION: f32 = 0.3;
 
 type CameraClicked = Rc<RefCell<Option<Box<dyn Fn(Option<u32>)>>>>;
 type CameraActivated = Rc<RefCell<Option<Box<dyn Fn(u32)>>>>;
@@ -114,6 +132,9 @@ pub struct Viewport {
     on_edit: EditRequested,
     on_point_picked: PointPicked,
     ortho_toggle: gtk::ToggleButton,
+    /// Navigation cube overlay and the face under the pointer.
+    cube: gtk::DrawingArea,
+    cube_hover: Rc<Cell<Option<ViewPreset>>>,
 }
 
 /// A camera as drawn: RealityScan index, centre, pose and frustum depth.
@@ -202,7 +223,9 @@ impl Default for State {
             show_textures: true,
             show_colors: true,
             show_cameras: true,
-            show_region: true,
+            // Off by default: with its rings the box crowds the scene. Opening the Region
+            // panel shows it.
+            show_region: false,
             focus: None,
             last_pointer: (0.0, 0.0),
             drag_moved: 0.0,
@@ -288,25 +311,48 @@ fn region_centre(r: &Region) -> Vec3 {
     Vec3::new(r.centre[0] as f32, r.centre[1] as f32, r.centre[2] as f32)
 }
 
-/// Handles with their world positions: six face centres and the box centre.
-fn region_handles(r: &Region) -> Vec<(Handle, Vec3)> {
+fn region_diagonal(r: &Region) -> f32 {
+    (r.size[0] * r.size[0] + r.size[1] * r.size[1] + r.size[2] * r.size[2]).sqrt() as f32
+}
+
+/// Handles with the world point they are attached to and where they are drawn and grabbed:
+/// a face handle sits on a stem standing out of its face centre; the centre handle is the
+/// box centre.
+fn region_handles(r: &Region) -> Vec<(Handle, Vec3, Vec3)> {
     let axes = region_axes(r);
     let c = region_centre(r);
+    let stick = (region_diagonal(r) * HANDLE_STICK_OUT).max(1e-3);
     let mut out = Vec::with_capacity(7);
     for (axis, dir) in axes.iter().enumerate() {
         for positive in [true, false] {
-            let sign = if positive { 0.5 } else { -0.5 };
-            out.push((Handle::Face { axis, positive }, c + *dir * (r.size[axis] as f32 * sign)));
+            let sign = if positive { 1.0 } else { -1.0 };
+            let base = c + *dir * (r.size[axis] as f32 * 0.5 * sign);
+            out.push((Handle::Face { axis, positive }, base, base + *dir * (stick * sign)));
         }
     }
-    out.push((Handle::Centre, c));
+    out.push((Handle::Centre, c, c));
     out
+}
+
+/// A point on screen, in logical pixels.
+type Px = (f64, f64);
+
+/// Screen positions of the handles that can be grabbed from this view: (handle, base, tip).
+fn visible_handles(r: &Region, vp: &Mat4, w: f64, h: f64) -> Vec<(Handle, Px, Px)> {
+    region_handles(r)
+        .into_iter()
+        .filter_map(|(handle, base, tip)| {
+            let (b, t) = (to_pixels(vp, base, w, h)?, to_pixels(vp, tip, w, h)?);
+            let edge_on = matches!(handle, Handle::Face { .. })
+                && (t.0 - b.0).hypot(t.1 - b.1) < HANDLE_MIN_STEM_PX;
+            (!edge_on).then_some((handle, b, t))
+        })
+        .collect()
 }
 
 /// Radius of the rotation rings: just outside the box's circumscribed sphere.
 fn ring_radius(r: &Region) -> f32 {
-    let diag = (r.size[0] * r.size[0] + r.size[1] * r.size[1] + r.size[2] * r.size[2]).sqrt() as f32;
-    (diag * 0.5 * 1.08).max(1e-3)
+    (region_diagonal(r) * 0.5 * 1.08).max(1e-3)
 }
 
 /// Points around the ring about local `axis` (closed: the first point is repeated).
@@ -343,13 +389,20 @@ fn region_segments(r: &Region, hover: Option<Handle>, with_handles: bool) -> Vec
     let corners = r.corners().map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32));
     // Corners 0–3 have local z = −½: the bottom face. Its edges get their own colour and a grid
     // fills it, so it reads as the floor the ground plane will be set on.
-    let mut out: Vec<Segment> = Region::EDGES
-        .iter()
-        .map(|&(a, b)| {
-            let color = if a < 4 && b < 4 { GROUND_FACE_COLOR } else { REGION_COLOR };
-            Segment { a: corners[a], b: corners[b], color }
-        })
-        .collect();
+    let mut out: Vec<Segment> = Vec::with_capacity(64 + 3 * RING_SEGMENTS);
+    for &(a, b) in &Region::EDGES {
+        let color = if a < 4 && b < 4 { GROUND_FACE_COLOR } else { REGION_COLOR };
+        if a == 0 {
+            // The three edges leaving corner 0 (−X, −Y, −Z) start in their axis colour, so
+            // the box shows which way its local X, Y and Z run.
+            let axis = b.trailing_zeros() as usize;
+            let mid = corners[0].lerp(corners[b], AXIS_MARKER_FRACTION);
+            out.push(Segment { a: corners[0], b: mid, color: RING_COLORS[axis] });
+            out.push(Segment { a: mid, b: corners[b], color });
+        } else {
+            out.push(Segment { a: corners[a], b: corners[b], color });
+        }
+    }
     for i in 1..GROUND_GRID_CELLS {
         let t = i as f32 / GROUND_GRID_CELLS as f32;
         // Lines parallel to local X (between the −Y and +Y edges) and to local Y.
@@ -367,27 +420,8 @@ fn region_segments(r: &Region, hover: Option<Handle>, with_handles: bool) -> Vec
     if !with_handles {
         return out;
     }
-    let axes = region_axes(r);
-    let diag = (r.size[0] * r.size[0] + r.size[1] * r.size[1] + r.size[2] * r.size[2]).sqrt() as f32;
-    let h = (diag * 0.025).max(1e-3);
-    for (handle, pos) in region_handles(r) {
-        let color = if hover == Some(handle) { HOVER_COLOR } else { HANDLE_COLOR };
-        match handle {
-            Handle::Face { axis, .. } => {
-                let (u, v) = (axes[(axis + 1) % 3] * h, axes[(axis + 2) % 3] * h);
-                let q = [pos + u + v, pos - u + v, pos - u - v, pos + u - v];
-                for i in 0..4 {
-                    out.push(Segment { a: q[i], b: q[(i + 1) % 4], color });
-                }
-            }
-            Handle::Centre => {
-                for a in axes {
-                    out.push(Segment { a: pos - a * h, b: pos + a * h, color });
-                }
-            }
-            Handle::Ring { .. } => {}
-        }
-    }
+    // The face and centre handles are drawn in screen space on the overlay layer (see
+    // `draw_gizmo_overlay`); the rings are drawn here, with a thick overlay copy when hovered.
     for (axis, ring_color) in RING_COLORS.into_iter().enumerate() {
         let color = if hover == Some(Handle::Ring { axis }) { HOVER_COLOR } else { ring_color };
         let pts = ring_points(r, axis);
@@ -402,6 +436,210 @@ fn rebuild_region(st: &mut State) {
         None => Vec::new(),
     };
     st.dirty_lines = true;
+}
+
+/// Faces of the navigation cube: the view each selects, with its label.
+const NAV_CUBE_FACES: [(ViewPreset, &str); 6] = [
+    (ViewPreset::Front, "Front"),
+    (ViewPreset::Back, "Back"),
+    (ViewPreset::Left, "Left"),
+    (ViewPreset::Right, "Right"),
+    (ViewPreset::Top, "Top"),
+    (ViewPreset::Bottom, "Bottom"),
+];
+
+/// A navigation-cube face as seen now: its view, label, screen corners, text axes (right,
+/// down) in pixels per unit face width, and how directly it faces the viewer (0–1).
+struct CubeFace {
+    preset: ViewPreset,
+    label: &'static str,
+    quad: [(f64, f64); 4],
+    centre: (f64, f64),
+    right: (f64, f64),
+    down: (f64, f64),
+    facing: f64,
+}
+
+/// The cube faces that face the viewer, farthest first (paint order).
+fn nav_cube_faces(camera: &OrbitCamera, w: f64, h: f64) -> Vec<CubeFace> {
+    let view = camera.view();
+    let scale = w.min(h) * 0.36;
+    let (cx, cy) = (w * 0.5, h * 0.5);
+    // Rotation only: the cube sits at the widget centre whatever the camera position.
+    let project = |v: Vec3| {
+        let p = view.transform_vector3(v);
+        (p.x as f64 * scale, -p.y as f64 * scale, p.z as f64)
+    };
+    let snap = |v: Vec3| {
+        // Preset cameras tilt a hair off the poles; round their axes to the world axes.
+        let a = v.abs();
+        if a.x >= a.y && a.x >= a.z {
+            Vec3::X * v.x.signum()
+        } else if a.y >= a.z {
+            Vec3::Y * v.y.signum()
+        } else {
+            Vec3::Z * v.z.signum()
+        }
+    };
+    let mut faces: Vec<(f64, CubeFace)> = NAV_CUBE_FACES
+        .iter()
+        .filter_map(|&(preset, label)| {
+            // The face a preset looks at, with that view's right and up as the text axes.
+            let mut c = camera.clone();
+            c.set_preset(preset);
+            let v = c.view();
+            let normal = snap(c.eye() - c.target);
+            let right = snap(Vec3::new(v.x_axis.x, v.y_axis.x, v.z_axis.x));
+            let up = snap(Vec3::new(v.x_axis.y, v.y_axis.y, v.z_axis.y));
+            let facing = project(normal).2;
+            if facing <= 0.02 {
+                return None;
+            }
+            let centre3 = normal * 0.5;
+            let corner = |a: f32, b: f32| {
+                let p = project(centre3 + right * (0.5 * a) + up * (0.5 * b));
+                (cx + p.0, cy + p.1)
+            };
+            let c0 = project(centre3);
+            let r = project(right);
+            let d = project(-up);
+            Some((
+                c0.2,
+                CubeFace {
+                    preset,
+                    label,
+                    quad: [corner(-1.0, 1.0), corner(1.0, 1.0), corner(1.0, -1.0), corner(-1.0, -1.0)],
+                    centre: (cx + c0.0, cy + c0.1),
+                    right: (r.0, r.1),
+                    down: (d.0, d.1),
+                    facing,
+                },
+            ))
+        })
+        .collect();
+    faces.sort_by(|a, b| a.0.total_cmp(&b.0));
+    faces.into_iter().map(|(_, f)| f).collect()
+}
+
+/// The face under (`x`, `y`), nearest the viewer first.
+fn nav_cube_pick(camera: &OrbitCamera, w: f64, h: f64, x: f64, y: f64) -> Option<ViewPreset> {
+    nav_cube_faces(camera, w, h).into_iter().rev().find(|f| inside_polygon(&f.quad, x, y)).map(|f| f.preset)
+}
+
+fn draw_nav_cube(
+    area: &gtk::DrawingArea,
+    cr: &gtk::cairo::Context,
+    w: f64,
+    h: f64,
+    camera: &OrbitCamera,
+    hover: Option<ViewPreset>,
+) {
+    let fg = area.color();
+    let (fr, fg_, fb) = (fg.red() as f64, fg.green() as f64, fg.blue() as f64);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+    for face in nav_cube_faces(camera, w, h) {
+        let hot = hover == Some(face.preset);
+        cr.move_to(face.quad[0].0, face.quad[0].1);
+        for p in &face.quad[1..] {
+            cr.line_to(p.0, p.1);
+        }
+        cr.close_path();
+        // Shade by how directly the face looks at the viewer, so the cube reads as solid.
+        let shade = 0.22 + 0.18 * face.facing;
+        if hot {
+            cr.set_source_rgba(0.21, 0.52, 0.89, 0.95);
+        } else {
+            cr.set_source_rgba(shade, shade, shade + 0.02, 0.92);
+        }
+        let _ = cr.fill_preserve();
+        cr.set_source_rgba(fr, fg_, fb, 0.55);
+        cr.set_line_width(1.0);
+        let _ = cr.stroke();
+        if face.facing < 0.25 {
+            continue;
+        }
+        // Text in the face's own plane: map a unit square to the projected face.
+        let _ = cr.save();
+        let m = gtk::cairo::Matrix::new(
+            face.right.0,
+            face.right.1,
+            face.down.0,
+            face.down.1,
+            face.centre.0,
+            face.centre.1,
+        );
+        cr.transform(m);
+        cr.set_font_size(0.24);
+        if let Ok(ext) = cr.text_extents(face.label) {
+            let size = if ext.width() > 0.86 { 0.24 * 0.86 / ext.width() } else { 0.24 };
+            cr.set_font_size(size);
+            if let Ok(ext) = cr.text_extents(face.label) {
+                cr.move_to(-ext.width() / 2.0 - ext.x_bearing(), -ext.height() / 2.0 - ext.y_bearing());
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.35 + 0.65 * face.facing);
+                let _ = cr.show_text(face.label);
+            }
+        }
+        let _ = cr.restore();
+    }
+}
+
+/// Toolbar icon for the projection: converging edges for perspective, parallel ones for the
+/// orthographic view.
+fn draw_projection_icon(area: &gtk::DrawingArea, cr: &gtk::cairo::Context, w: f64, h: f64, ortho: bool) {
+    let fg = area.color();
+    cr.set_source_rgba(fg.red() as f64, fg.green() as f64, fg.blue() as f64, fg.alpha() as f64);
+    cr.set_line_width(1.5);
+    cr.set_line_join(gtk::cairo::LineJoin::Round);
+    let (x0, x1, y0, y1) = (1.5, w - 1.5, 2.5, h - 2.5);
+    if ortho {
+        // A cube drawn with parallel edges.
+        let d = (w * 0.3).round();
+        cr.rectangle(x0, y0 + d, x1 - x0 - d, y1 - y0 - d);
+        cr.move_to(x0, y0 + d);
+        cr.line_to(x0 + d, y0);
+        cr.line_to(x1, y0);
+        cr.line_to(x1 - d, y0 + d);
+        cr.move_to(x1, y0);
+        cr.line_to(x1, y1 - d);
+        cr.line_to(x1 - d, y1);
+    } else {
+        // A frustum: the far side is smaller, the edges converge.
+        let (mx, my) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let (fw, fh) = ((x1 - x0) * 0.22, (y1 - y0) * 0.22);
+        cr.rectangle(x0, y0, x1 - x0, y1 - y0);
+        cr.rectangle(mx - fw, my - fh, fw * 2.0, fh * 2.0);
+        for (ax, ay, bx, by) in
+            [(x0, y0, mx - fw, my - fh), (x1, y0, mx + fw, my - fh), (x1, y1, mx + fw, my + fh), (x0, y1, mx - fw, my + fh)]
+        {
+            cr.move_to(ax, ay);
+            cr.line_to(bx, by);
+        }
+    }
+    let _ = cr.stroke();
+}
+
+/// Handle names used by the script hooks: `centre`, `ring-x|y|z`, or a sign and axis (`+x`, `-z`).
+fn parse_handle(name: &str) -> Option<Handle> {
+    Some(match name {
+        "centre" | "center" => Handle::Centre,
+        "ring-x" => Handle::Ring { axis: 0 },
+        "ring-y" => Handle::Ring { axis: 1 },
+        "ring-z" => Handle::Ring { axis: 2 },
+        h => {
+            let (positive, axis) = match h.as_bytes() {
+                [sign, axis] => (*sign != b'-', (*axis as char).to_ascii_lowercase()),
+                _ => return None,
+            };
+            let axis = match axis {
+                'x' => 0,
+                'y' => 1,
+                'z' => 2,
+                _ => return None,
+            };
+            Handle::Face { axis, positive }
+        }
+    })
 }
 
 /// Distance from `p` to the segment `a`–`b` (pixels).
@@ -537,52 +775,56 @@ impl Viewport {
         texture_toggle.set_tooltip_text(Some("Show the texture instead of vertex colours"));
         let cameras_toggle = gtk::ToggleButton::builder().label("Cameras").active(true).build();
         cameras_toggle.set_tooltip_text(Some("Show camera positions"));
-        let region_toggle = gtk::ToggleButton::builder().label("Region").active(true).build();
+        let region_toggle = gtk::ToggleButton::builder().label("Region").active(false).build();
         region_toggle.set_tooltip_text(Some("Show the reconstruction region"));
         let lasso_toggle = gtk::ToggleButton::builder().icon_name("edit-select-all-symbolic").build();
         lasso_toggle.set_tooltip_text(Some(
             "Lasso: drag around triangles (mesh) or cameras (points) to select them.\nShift adds, Ctrl removes, a click clears.",
         ));
-        // View: projection and the standard axis views.
-        let view_menu = gtk::MenuButton::builder()
-            .icon_name("view-reveal-symbolic")
-            .tooltip_text("View direction and projection")
-            .build();
-        let view_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        let ortho_toggle = gtk::ToggleButton::with_label("Parallel projection");
-        ortho_toggle.set_tooltip_text(Some("Orthographic view without perspective (numpad 5)"));
-        view_box.append(&ortho_toggle);
-        let grid = gtk::Grid::builder().row_spacing(3).column_spacing(3).column_homogeneous(true).build();
-        let presets = [
-            ("Top", ViewPreset::Top, "numpad 7"),
-            ("Bottom", ViewPreset::Bottom, "Ctrl+numpad 7"),
-            ("Front", ViewPreset::Front, "numpad 1"),
-            ("Back", ViewPreset::Back, "Ctrl+numpad 1"),
-            ("Left", ViewPreset::Left, "Ctrl+numpad 3"),
-            ("Right", ViewPreset::Right, "numpad 3"),
-        ];
-        let mut preset_buttons = Vec::new();
-        for (i, (label, preset, key)) in presets.into_iter().enumerate() {
-            let b = gtk::Button::with_label(label);
-            b.set_tooltip_text(Some(key));
-            grid.attach(&b, (i % 2) as i32, (i / 2) as i32, 1, 1);
-            preset_buttons.push((b, preset));
-        }
-        view_box.append(&grid);
-        let view_popover = gtk::Popover::builder().child(&view_box).build();
-        view_menu.set_popover(Some(&view_popover));
+        // Perspective / parallel switch; its icon shows the current projection. The choice is
+        // remembered. (The axis views are on the navigation cube.)
+        let ortho = crate::settings::get(ORTHO_KEY).is_some_and(|v| v == "1");
+        let ortho_icon = gtk::DrawingArea::builder().content_width(16).content_height(16).build();
+        let ortho_toggle = gtk::ToggleButton::builder().child(&ortho_icon).active(ortho).build();
+        ortho_icon.set_draw_func({
+            let toggle = ortho_toggle.clone();
+            move |area, cr, w, h| draw_projection_icon(area, cr, w as f64, h as f64, toggle.is_active())
+        });
+        let set_ortho_tooltip = |t: &gtk::ToggleButton| {
+            t.set_tooltip_text(Some(if t.is_active() {
+                "Parallel (orthographic) projection — click for perspective (numpad 5)"
+            } else {
+                "Perspective projection — click for parallel/orthographic (numpad 5)"
+            }));
+        };
+        set_ortho_tooltip(&ortho_toggle);
         bar.append(&reset);
-        bar.append(&view_menu);
+        bar.append(&ortho_toggle);
+        bar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         for t in [&points_toggle, &mesh_toggle, &texture_toggle, &cameras_toggle, &region_toggle] {
             bar.append(t);
         }
         bar.append(&gtk::Separator::new(gtk::Orientation::Vertical));
         bar.append(&lasso_toggle);
-        root.add_overlay(&bar);
 
-        // The lasso outline is drawn on a transparent layer that lets events through.
+        // The lasso outline and the region handles are drawn on a transparent layer that lets
+        // events through (under the toolbars).
         let lasso_layer = gtk::DrawingArea::builder().can_target(false).hexpand(true).vexpand(true).build();
         root.add_overlay(&lasso_layer);
+        root.add_overlay(&bar);
+
+        // Navigation cube in the bottom-right corner: it turns with the view, and clicking a
+        // face looks at the scene from that side.
+        let cube = gtk::DrawingArea::builder()
+            .content_width(NAV_CUBE_SIZE)
+            .content_height(NAV_CUBE_SIZE)
+            .halign(gtk::Align::End)
+            .valign(gtk::Align::End)
+            .margin_end(12)
+            .margin_bottom(12)
+            .build();
+        cube.set_cursor_from_name(Some("pointer"));
+        root.add_overlay(&cube);
 
         // Selected-triangle count and what to do with them; shown while something is selected.
         let selection_bar = gtk::Box::builder()
@@ -612,6 +854,7 @@ impl Viewport {
         root.add_overlay(&selection_bar);
 
         let state = Rc::new(RefCell::new(State::default()));
+        state.borrow_mut().camera.orthographic = ortho;
         let this = Self {
             root,
             area,
@@ -633,23 +876,62 @@ impl Viewport {
             on_edit: Rc::new(RefCell::new(None)),
             on_point_picked: Rc::new(RefCell::new(None)),
             ortho_toggle: ortho_toggle.clone(),
+            cube,
+            cube_hover: Rc::new(Cell::new(None)),
         };
 
         ortho_toggle.connect_toggled({
             let this = this.clone();
+            let icon = ortho_icon.clone();
             move |t| {
                 this.state.borrow_mut().camera.orthographic = t.is_active();
-                this.area.queue_render();
+                crate::settings::set(ORTHO_KEY, if t.is_active() { "1" } else { "0" });
+                set_ortho_tooltip(t);
+                icon.queue_draw();
+                this.redraw();
             }
         });
-        for (b, preset) in preset_buttons {
+        this.cube.set_draw_func({
             let this = this.clone();
-            let popover = view_popover.clone();
-            b.connect_clicked(move |_| {
-                popover.popdown();
-                this.set_view_preset(preset);
-            });
-        }
+            move |area, cr, w, h| {
+                let camera = this.state.borrow().camera.clone();
+                draw_nav_cube(area, cr, w as f64, h as f64, &camera, this.cube_hover.get());
+            }
+        });
+        let cube_click = gtk::GestureClick::new();
+        cube_click.set_button(1);
+        cube_click.connect_released({
+            let this = this.clone();
+            move |_, _, x, y| {
+                let (w, h) = (this.cube.width() as f64, this.cube.height() as f64);
+                let camera = this.state.borrow().camera.clone();
+                if let Some(preset) = nav_cube_pick(&camera, w, h, x, y) {
+                    this.set_view_preset(preset);
+                }
+            }
+        });
+        this.cube.add_controller(cube_click);
+        let cube_motion = gtk::EventControllerMotion::new();
+        cube_motion.connect_motion({
+            let this = this.clone();
+            move |_, x, y| {
+                let (w, h) = (this.cube.width() as f64, this.cube.height() as f64);
+                let camera = this.state.borrow().camera.clone();
+                let hit = nav_cube_pick(&camera, w, h, x, y);
+                if hit != this.cube_hover.get() {
+                    this.cube_hover.set(hit);
+                    this.cube.queue_draw();
+                }
+            }
+        });
+        cube_motion.connect_leave({
+            let this = this.clone();
+            move |_| {
+                this.cube_hover.set(None);
+                this.cube.queue_draw();
+            }
+        });
+        this.cube.add_controller(cube_motion);
         // Numpad views (Blender's layout) while the 3D view has the keyboard focus.
         this.area.set_focusable(true);
         let keys = gtk::EventControllerKey::new();
@@ -690,6 +972,7 @@ impl Viewport {
         this.lasso_layer.set_draw_func({
             let this = this.clone();
             move |_, cr, _, _| {
+                this.draw_gizmo_overlay(cr);
                 let st = this.state.borrow();
                 if st.lasso.len() < 2 {
                     return;
@@ -843,8 +1126,8 @@ impl Viewport {
                             st.camera.orbit_about(pivot, ox, oy);
                             // A repaint requested from inside the render handler is dropped;
                             // ask again once it has returned.
-                            let area = area.clone();
-                            glib::idle_add_local_once(move || area.queue_render());
+                            let this = this.clone();
+                            glib::idle_add_local_once(move || this.redraw());
                         }
                     }
                     if let Some((px, py)) = st.pending_point_pick.take()
@@ -899,7 +1182,7 @@ impl Viewport {
                             }
                             // The highlight is uploaded on the next render; requesting it from
                             // inside the render handler would be dropped.
-                            this.area.queue_render();
+                            this.redraw();
                         });
                     }
                 }
@@ -915,21 +1198,21 @@ impl Viewport {
             let this = this.clone();
             move |t| {
                 this.state.borrow_mut().show_points = t.is_active();
-                this.area.queue_render();
+                this.redraw();
             }
         });
         this.mesh_toggle.connect_toggled({
             let this = this.clone();
             move |t| {
                 this.state.borrow_mut().show_mesh = t.is_active();
-                this.area.queue_render();
+                this.redraw();
             }
         });
         this.texture_toggle.connect_toggled({
             let this = this.clone();
             move |t| {
                 this.state.borrow_mut().show_textures = t.is_active();
-                this.area.queue_render();
+                this.redraw();
             }
         });
         cameras_toggle.connect_toggled({
@@ -939,7 +1222,7 @@ impl Viewport {
                 st.show_cameras = t.is_active();
                 st.dirty_lines = true;
                 drop(st);
-                this.area.queue_render();
+                this.redraw();
             }
         });
         region_toggle.connect_toggled({
@@ -949,7 +1232,7 @@ impl Viewport {
                 st.show_region = t.is_active();
                 st.dirty_lines = true;
                 drop(st);
-                this.area.queue_render();
+                this.redraw();
             }
         });
 
@@ -976,7 +1259,7 @@ impl Viewport {
                     // Orbit around whatever is under the pointer; the next render looks it up.
                     st.pending_pick = Some((x, y));
                     drop(st);
-                    this.area.queue_render();
+                    this.redraw();
                 }
             }
         });
@@ -1000,7 +1283,7 @@ impl Viewport {
                     drag.snap = gesture.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK);
                     Viewport::update_region_drag(&mut st, (x, y));
                     drop(st);
-                    this.area.queue_render();
+                    this.redraw();
                     return;
                 }
                 match gesture.current_button() {
@@ -1020,7 +1303,7 @@ impl Viewport {
                     }
                 }
                 drop(st);
-                this.area.queue_render();
+                this.redraw();
             }
         });
         drag.connect_drag_end({
@@ -1045,7 +1328,7 @@ impl Viewport {
                     };
                     if outline.len() >= 3 && moved > 4.0 {
                         this.state.borrow_mut().lasso_pending = Some((outline, mode));
-                        this.area.queue_render();
+                        this.redraw();
                     } else if mode == LassoMode::Replace {
                         this.clear_selection();
                     }
@@ -1074,7 +1357,7 @@ impl Viewport {
                 }
                 if gesture.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                     this.state.borrow_mut().pending_point_pick = Some((x, y));
-                    this.area.queue_render();
+                    this.redraw();
                     return;
                 }
                 let hit = this.pick_camera(x, y);
@@ -1117,7 +1400,7 @@ impl Viewport {
                     rebuild_region(&mut st);
                     drop(st);
                     this.area.set_cursor_from_name(Some(if hover.is_some() { "pointer" } else { "default" }));
-                    this.area.queue_render();
+                    this.redraw();
                 }
             }
         });
@@ -1128,7 +1411,7 @@ impl Viewport {
                 if st.hover.take().is_some() {
                     rebuild_region(&mut st);
                     drop(st);
-                    this.area.queue_render();
+                    this.redraw();
                 }
             }
         });
@@ -1139,12 +1422,111 @@ impl Viewport {
             let this = this.clone();
             move |_, _dx, dy| {
                 this.state.borrow_mut().camera.zoom(1.15f32.powf(-dy as f32));
-                this.area.queue_render();
+                this.redraw();
                 gtk::glib::Propagation::Stop
             }
         });
         this.area.add_controller(scroll);
         this
+    }
+
+    /// Repaint the 3D view and the overlay drawn over it.
+    fn redraw(&self) {
+        self.area.queue_render();
+        self.lasso_layer.queue_draw();
+        self.cube.queue_draw();
+    }
+
+    /// Region handles in screen space, so they keep a constant size, stay visible through
+    /// the model and can be told apart: a disc on a stem per face (in its axis colour), a
+    /// square at the centre, and a thick copy of a hovered ring.
+    fn draw_gizmo_overlay(&self, cr: &gtk::cairo::Context) {
+        let st = self.state.borrow();
+        if !st.show_region {
+            return;
+        }
+        let Some(region) = st.region_model.as_ref() else { return };
+        let Some((vp, w, h)) = self.view_projection(&st) else { return };
+        let rgb = |c: [u8; 3]| (c[0] as f64 / 255.0, c[1] as f64 / 255.0, c[2] as f64 / 255.0);
+        let active = st.region_drag.as_ref().map(|d| d.handle).or(st.hover);
+        cr.set_line_cap(gtk::cairo::LineCap::Round);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+
+        if let Some(Handle::Ring { axis }) = active {
+            let pts: Vec<_> = ring_points(region, axis).into_iter().map(|p| to_pixels(&vp, p, w, h)).collect();
+            let mut pen_down = false;
+            for p in pts {
+                match (p, pen_down) {
+                    (Some((x, y)), true) => cr.line_to(x, y),
+                    (Some((x, y)), false) => cr.move_to(x, y),
+                    (None, _) => {}
+                }
+                pen_down = p.is_some();
+            }
+            let (r, g, b) = rgb(RING_COLORS[axis]);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.5);
+            cr.set_line_width(7.0);
+            let _ = cr.stroke_preserve();
+            cr.set_source_rgb(r * 0.4 + 0.6, g * 0.4 + 0.6, b * 0.4 + 0.6);
+            cr.set_line_width(4.0);
+            let _ = cr.stroke();
+        }
+
+        // Axis letters at the ends of the coloured corner markers.
+        let corners = region.corners().map(|c| Vec3::new(c[0] as f32, c[1] as f32, c[2] as f32));
+        cr.select_font_face("Sans", gtk::cairo::FontSlant::Normal, gtk::cairo::FontWeight::Bold);
+        cr.set_font_size(12.0);
+        for (axis, (corner, label)) in [(1, "X"), (2, "Y"), (4, "Z")].into_iter().enumerate() {
+            let end = corners[0].lerp(corners[corner], AXIS_MARKER_FRACTION);
+            let (Some(o), Some(e)) = (to_pixels(&vp, corners[0], w, h), to_pixels(&vp, end, w, h)) else {
+                continue;
+            };
+            let (dx, dy) = (e.0 - o.0, e.1 - o.1);
+            let len = dx.hypot(dy);
+            if len < 12.0 {
+                continue;
+            }
+            let (x, y) = (e.0 + dx / len * 9.0 - 4.0, e.1 + dy / len * 9.0 + 4.5);
+            let (r, g, b) = rgb(RING_COLORS[axis]);
+            cr.move_to(x, y);
+            cr.text_path(label);
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.7);
+            cr.set_line_width(3.0);
+            let _ = cr.stroke_preserve();
+            cr.set_source_rgb(r, g, b);
+            let _ = cr.fill();
+        }
+
+        for (handle, base, tip) in visible_handles(region, &vp, w, h) {
+            let hot = active == Some(handle);
+            let radius = if hot { HANDLE_HOVER_RADIUS } else { HANDLE_DISC_RADIUS };
+            let (r, g, b) = match handle {
+                Handle::Face { axis, .. } => rgb(RING_COLORS[axis]),
+                _ => rgb(REGION_COLOR),
+            };
+            if matches!(handle, Handle::Face { .. }) {
+                cr.move_to(base.0, base.1);
+                cr.line_to(tip.0, tip.1);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.5);
+                cr.set_line_width(if hot { 5.0 } else { 3.5 });
+                let _ = cr.stroke_preserve();
+                cr.set_source_rgb(r, g, b);
+                cr.set_line_width(if hot { 3.0 } else { 1.5 });
+                let _ = cr.stroke();
+                cr.arc(tip.0, tip.1, radius, 0.0, std::f64::consts::TAU);
+            } else {
+                cr.rectangle(tip.0 - radius, tip.1 - radius, radius * 2.0, radius * 2.0);
+            }
+            if hot {
+                cr.set_source_rgb(1.0, 1.0, 1.0);
+            } else {
+                cr.set_source_rgb(r, g, b);
+            }
+            let _ = cr.fill_preserve();
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.75);
+            cr.set_line_width(if hot { 2.5 } else { 1.5 });
+            let _ = cr.stroke();
+        }
     }
 
     pub fn widget(&self) -> &gtk::Overlay {
@@ -1192,7 +1574,7 @@ impl Viewport {
         st.selected_cameras = new;
         st.dirty_lines = true;
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Replace the displayed sparse cloud and cameras, and frame them.
@@ -1245,7 +1627,7 @@ impl Viewport {
         st.dirty_points = true;
         st.dirty_lines = true;
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Show control points as crosses; `selected` is drawn white and larger.
@@ -1264,7 +1646,7 @@ impl Viewport {
         st.control_points = out;
         st.dirty_lines = true;
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Called when the user finishes dragging the region gizmo.
@@ -1281,30 +1663,12 @@ impl Viewport {
         st.region_model = region.cloned();
         rebuild_region(&mut st);
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Developer hook: drag a gizmo handle by `dx`/`dy` pixels as if with the mouse.
     pub fn script_region_drag(&self, handle: &str, dx: f64, dy: f64) {
-        let handle = match handle {
-            "centre" | "center" => Handle::Centre,
-            "ring-x" => Handle::Ring { axis: 0 },
-            "ring-y" => Handle::Ring { axis: 1 },
-            "ring-z" => Handle::Ring { axis: 2 },
-            h => {
-                let (positive, axis) = match h.as_bytes() {
-                    [sign, axis] => (*sign != b'-', (*axis as char).to_ascii_lowercase()),
-                    _ => return,
-                };
-                let axis = match axis {
-                    'x' => 0,
-                    'y' => 1,
-                    'z' => 2,
-                    _ => return,
-                };
-                Handle::Face { axis, positive }
-            }
-        };
+        let Some(handle) = parse_handle(handle) else { return };
         let region = {
             let mut st = self.state.borrow_mut();
             let Some((vp, w, h)) = self.view_projection(&st) else { return };
@@ -1312,7 +1676,7 @@ impl Viewport {
                 let p = match handle {
                     // A quarter of the way round the ring, where it is seldom edge-on.
                     Handle::Ring { axis } => Some(ring_points(r, axis)[RING_SEGMENTS / 8]),
-                    _ => region_handles(r).into_iter().find(|(hh, _)| *hh == handle).map(|(_, p)| p),
+                    _ => region_handles(r).into_iter().find(|(hh, ..)| *hh == handle).map(|(.., p)| p),
                 };
                 p.and_then(|p| to_pixels(&vp, p, w, h))
             }) else {
@@ -1323,10 +1687,19 @@ impl Viewport {
             st.region_drag = None;
             st.region_model.clone()
         };
-        self.area.queue_render();
+        self.redraw();
         if let (Some(region), Some(cb)) = (region, self.on_region_changed.borrow().as_ref()) {
             cb(region);
         }
+    }
+
+    /// Developer hook: highlight a gizmo handle as if the pointer rested on it (`None` clears).
+    pub fn script_hover(&self, handle: Option<&str>) {
+        let mut st = self.state.borrow_mut();
+        st.hover = handle.and_then(parse_handle);
+        rebuild_region(&mut st);
+        drop(st);
+        self.redraw();
     }
 
     fn view_projection(&self, st: &State) -> Option<(Mat4, f64, f64)> {
@@ -1343,10 +1716,9 @@ impl Viewport {
         let region = st.region_model.as_ref()?;
         let (vp, w, h) = self.view_projection(&st)?;
         let mut best: Option<(f64, Handle)> = None;
-        for (handle, pos) in region_handles(region) {
-            let Some((px, py)) = to_pixels(&vp, pos, w, h) else { continue };
+        for (handle, _, (px, py)) in visible_handles(region, &vp, w, h) {
             let d = (px - x).hypot(py - y);
-            if d <= PICK_RADIUS && best.is_none_or(|(bd, _)| d < bd) {
+            if d <= PICK_RADIUS * 0.8 && best.is_none_or(|(bd, _)| d < bd) {
                 best = Some((d, handle));
             }
         }
@@ -1360,7 +1732,7 @@ impl Viewport {
             for pair in pts.windows(2) {
                 let (Some(a), Some(b)) = (pair[0], pair[1]) else { continue };
                 let d = point_segment_distance((x, y), a, b);
-                if d <= PICK_RADIUS * 0.7 && best.is_none_or(|(bd, _)| d < bd) {
+                if d <= RING_PICK_RADIUS && best.is_none_or(|(bd, _)| d < bd) {
                     best = Some((d, Handle::Ring { axis }));
                 }
             }
@@ -1373,7 +1745,7 @@ impl Viewport {
         let (vp, w, h) = self.view_projection(st)?;
         let axes = region_axes(&region);
         let centre = region_centre(&region);
-        let diag = (region.size[0].powi(2) + region.size[1].powi(2) + region.size[2].powi(2)).sqrt() as f32;
+        let diag = region_diagonal(&region);
         let (axis, px_per_unit) = match handle {
             Handle::Face { axis, positive } => {
                 let dir = axes[axis] * if positive { 1.0 } else { -1.0 };
@@ -1490,7 +1862,7 @@ impl Viewport {
         // colours of one model is not meant to carry over to the next.
         self.set_show_textures(true);
         self.set_show_colors(true);
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn clear_mesh(&self) {
@@ -1506,7 +1878,7 @@ impl Viewport {
         self.mesh_toggle.set_sensitive(false);
         self.texture_toggle.set_visible(false);
         self.points_toggle.set_active(true);
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn clear(&self) {
@@ -1530,7 +1902,7 @@ impl Viewport {
         self.mesh_toggle.set_sensitive(false);
         self.texture_toggle.set_visible(false);
         self.points_toggle.set_active(true);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Show the texture (where the mesh has one) or the vertex colours instead.
@@ -1551,7 +1923,7 @@ impl Viewport {
             }
             st.show_colors = on;
         }
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn show_colors(&self) -> bool {
@@ -1567,7 +1939,7 @@ impl Viewport {
     pub fn script_point_pick(&self, fx: f64, fy: f64) {
         let (w, h) = (self.area.width() as f64, self.area.height() as f64);
         self.state.borrow_mut().pending_point_pick = Some((fx * w, fy * h));
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn connect_selection_changed(&self, f: impl Fn(usize) + 'static) {
@@ -1615,7 +1987,7 @@ impl Viewport {
             st.dirty_selection = true;
         }
         self.selection_changed();
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn invert_selection(&self) {
@@ -1630,7 +2002,7 @@ impl Viewport {
             st.dirty_selection = true;
         }
         self.selection_changed();
-        self.area.queue_render();
+        self.redraw();
     }
 
     pub fn lasso_mode(&self) -> bool {
@@ -1678,13 +2050,13 @@ impl Viewport {
             }
         }
         self.state.borrow_mut().lasso_pending = Some((points, mode));
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Look along a world axis (Top, Front, …), keeping the target and zoom.
     pub fn set_view_preset(&self, preset: ViewPreset) {
         self.state.borrow_mut().camera.set_preset(preset);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Switch between perspective and parallel projection.
@@ -1702,7 +2074,7 @@ impl Viewport {
         st.camera.orbit(dx, dy);
         st.camera.zoom(factor);
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 
     /// Re-frame whatever is shown: the mesh if there is one, otherwise the sparse scene.
@@ -1719,7 +2091,7 @@ impl Viewport {
             };
         }
         drop(st);
-        self.area.queue_render();
+        self.redraw();
     }
 }
 
@@ -1789,6 +2161,34 @@ mod tests {
 #[cfg(test)]
 mod ring_tests {
     use super::*;
+
+    #[test]
+    fn nav_cube_shows_the_face_of_the_current_view() {
+        for (preset, _) in NAV_CUBE_FACES {
+            let mut cam = OrbitCamera { up: Vec3::Z, ..OrbitCamera::default() };
+            cam.set_preset(preset);
+            assert_eq!(nav_cube_pick(&cam, 110.0, 110.0, 55.0, 55.0), Some(preset));
+            // Its label reads left to right and top to bottom (not mirrored or upside down).
+            let faces = nav_cube_faces(&cam, 110.0, 110.0);
+            let face = faces.last().unwrap();
+            assert_eq!(face.preset, preset);
+            assert!(face.right.0 > 30.0 && face.right.1.abs() < 1.0, "{preset:?} {:?}", face.right);
+            assert!(face.down.1 > 30.0 && face.down.0.abs() < 1.0, "{preset:?} {:?}", face.down);
+        }
+    }
+
+    #[test]
+    fn handles_facing_the_viewer_are_hidden() {
+        let r = Region::new([0.0; 3], [2.0, 2.0, 2.0], [0.0, 0.0, 0.0]);
+        let mut cam = OrbitCamera { up: Vec3::Z, orthographic: true, ..OrbitCamera::framing(Vec3::splat(-1.0), Vec3::ONE, Vec3::Z) };
+        cam.set_preset(ViewPreset::Front);
+        let vp = cam.view_projection(1.0);
+        let handles: Vec<Handle> = visible_handles(&r, &vp, 400.0, 400.0).into_iter().map(|(h, ..)| h).collect();
+        // Looking along Y: the ±Y face handles point at the viewer; the other four and the
+        // centre stand clear of the box outline.
+        assert_eq!(handles.len(), 5, "{handles:?}");
+        assert!(!handles.iter().any(|h| matches!(h, Handle::Face { axis: 1, .. })));
+    }
 
     #[test]
     fn ground_face_is_the_local_bottom() {

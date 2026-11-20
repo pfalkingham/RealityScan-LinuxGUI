@@ -34,19 +34,26 @@ and are told apart throughout.
 
 Left-drag orbits around the point under the pointer (the framing centre when you start on the
 background), middle/right-drag pans, the wheel zooms, and the fit button re-frames. The toolbar
-toggles the sparse point cloud, the cameras, the reconstruction region box and the mesh. Click
+toggles the sparse point cloud, the cameras, the reconstruction region box (hidden until you
+open the Region panel or switch it on) and the mesh. Click
 a camera to select its image. Each model row in the sidebar expands to switches for its vertex
 colours and texture, and switching models keeps the current view so detail levels can be
 compared at the same zoom.
 
-The eye button in the toolbar holds the **view** options: parallel (orthographic) projection
-instead of perspective, and the standard views along the axes (top, bottom, front, back, left,
-right). With the 3D view focused the numpad works too: 7 top, 1 front, 3 right, Ctrl+7/1/3 the
-opposite sides, 5 switches between perspective and parallel.
+The projection button in the toolbar (its icon shows a frustum for perspective, a cube with
+parallel edges for orthographic) switches between the two; the choice is remembered. The
+**navigation cube** in the bottom-right corner turns with the view; click one of its faces
+(Front, Back, Left, Right, Top, Bottom) to look from that side. With the 3D view focused the
+numpad works too: 7 top, 1 front, 3 right, Ctrl+7/1/3 the opposite sides, 5 switches between
+perspective and parallel.
 
 The **reconstruction region** can be fitted automatically, typed in, or dragged in the viewport:
-face handles resize it, the centre handle moves it, and the three rings around it turn it about
-its own axes (Ctrl snaps to 15°).
+the discs standing out of each face resize it (coloured by axis; a face pointing straight at
+you hides its handle, since it can't be dragged from there), the square at the centre moves it,
+and the three rings around it turn it about its own axes (Ctrl snaps to 15°). A handle or ring
+turns white and thick under the pointer; only then does a left drag change the region rather
+than orbit. The box's local axes are marked at one corner by red (X), green (Y) and blue (Z)
+edge stubs with letters.
 
 The **ground plane** levels a skewed scene. The region's bottom face is drawn in orange with a
 grid: that is the face that becomes the ground. Turn the box until that face lies on the ground,

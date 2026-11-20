@@ -783,6 +783,16 @@ impl MainWindow {
             this,
             move |region| this.inner.backend.send(Cmd::SetRegion(region))
         ));
+        // The region box is hidden by default; opening the Region panel shows it.
+        if let Some(popover) = this.inner.region_panel.widget().popover() {
+            popover.connect_show(glib::clone!(
+                #[strong]
+                this,
+                move |_| {
+                    this.inner.viewport.set_display("region", true);
+                }
+            ));
+        }
         this.inner.image_grid.connect_selected_children_changed(glib::clone!(
             #[strong]
             this,
@@ -1170,7 +1180,15 @@ impl MainWindow {
         add("export-component", &[], Box::new(|w| w.pick_component_export()));
         add("import-component", &[], Box::new(|w| w.pick_component_import()));
         add("region-auto", &[], Box::new(|w| w.inner.backend.send(Cmd::RegionAuto)));
-        add("ground-from-region", &[], Box::new(|w| w.inner.backend.send(Cmd::GroundFromRegion)));
+        add(
+            "ground-from-region",
+            &[],
+            Box::new(|w| {
+                // Show the box whose bottom face becomes the ground.
+                w.inner.viewport.set_display("region", true);
+                w.inner.backend.send(Cmd::GroundFromRegion)
+            }),
+        );
         add("reset-ground", &[], Box::new(|w| w.inner.backend.send(Cmd::ResetGround)));
         add("region-density", &[], Box::new(|w| w.inner.backend.send(Cmd::RegionByDensity)));
         add("abort", &["Escape"], Box::new(|w| w.inner.backend.send(Cmd::Abort)));
@@ -1822,6 +1840,7 @@ impl MainWindow {
     /// `orbit:<dx>:<dy>`, `zoom:<factor>`, `reset-view`, `simplify:<n>`, `duplicate`,
     /// `select-model:<name>`, `delete-model:<name>`, `export:<path>` (default options),
     /// `region-drag:<+x|-x|+y|-y|-z|+z|centre|ring-x|ring-y|ring-z>:<dx>:<dy>` (pixels),
+    /// `hover:<handle|none>` (highlight a region handle as if the pointer rested on it),
     /// `view-preset:top|bottom|front|back|left|right`, `parallel[:off]`, `export-masks:<dir>`, `settings:<key>=<value>`,
     /// `open-image:<i>`, `back-3d`, `new-point:<name>`, `place:<x>:<y>`, `move:<label>:<dx>:<dy>`,
     /// `define-distance:<a>:<b>:<distance>`.
@@ -1903,6 +1922,7 @@ impl MainWindow {
                     let dy: f32 = extra.and_then(|e| e.parse().ok()).unwrap_or(0.0);
                     this.inner.viewport.nudge(dx, dy, 1.0);
                 }
+                ("hover", h) => this.inner.viewport.script_hover(h.filter(|h| *h != "none")),
                 ("zoom", Some(f)) => this.inner.viewport.nudge(0.0, 0.0, f.parse().unwrap_or(1.0)),
                 ("lasso-mode", Some(v)) => this.inner.viewport.set_lasso_mode(v == "on"),
                 ("expand-model", Some(i)) => {
