@@ -8,11 +8,17 @@ BIN = target/release/realityscan-gtk
 build:
 	cargo build --release -p realityscan-gtk
 
-# Optional: the dxcore.dll that gives RealityScan's AI masking the GPU (needs winegcc+clang).
+# The dxcore.dll that gives RealityScan's AI masking the GPU (needs winegcc+clang). Built by
+# `install` whenever the toolchain is present, so a plain clone + `make install` gives the GPU
+# path; skipped with a note when it isn't (the app still works, masking on the CPU).
 dxcore:
-	$(MAKE) -C tools/dxcore
+	@if command -v winegcc >/dev/null 2>&1; then \
+		$(MAKE) -C tools/dxcore; \
+	else \
+		echo "note: winegcc not found, not building dxcore.dll; AI masking will stay on the CPU (Arch: pacman -S wine clang)"; \
+	fi
 
-install: build
+install: build dxcore
 	install -Dm755 $(BIN) $(DESTDIR)$(PREFIX)/bin/realityscan-gtk
 	install -Dm644 packaging/$(APP_ID).desktop $(DESTDIR)$(PREFIX)/share/applications/$(APP_ID).desktop
 	install -Dm644 packaging/$(APP_ID).svg $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps/$(APP_ID).svg
